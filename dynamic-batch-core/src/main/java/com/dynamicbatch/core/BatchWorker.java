@@ -1,12 +1,12 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.core.constants.BatchWorkerConstant;
+import com.dynamicbatch.core.queue.VariableLinkedBlockingQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -20,7 +20,9 @@ public class BatchWorker<T> {
     private String name;
     /** 数据类型，submit 时做运行时校验（fail fast），避免错误类型混入队列 */
     private final Class<T> type;
-    private final LinkedBlockingQueue<T> queue;
+    // TODO 热更新：后续接入配置中心后，通过 queue.setCapacity(newCapacity) 动态调整容量。
+    // 注意事项：新容量必须 >= batchSize，否则攒批永远等不满，build() 的 batchSize <= queueCapacity 校验在运行时不再成立。
+    private final VariableLinkedBlockingQueue<T> queue;
     private final int queueCapacity;
     private final int batchSize;
     private final long maxWaitMs;
@@ -39,7 +41,7 @@ public class BatchWorker<T> {
         this.offerTimeoutMs = builder.offerTimeoutMs;
         this.flushCallback = builder.flushCallback;
         this.failureHandler = builder.failureHandler;
-        this.queue = new LinkedBlockingQueue<>(queueCapacity);
+        this.queue = new VariableLinkedBlockingQueue<>(queueCapacity);
     }
 
     public void setName(String name) {
@@ -97,9 +99,11 @@ public class BatchWorker<T> {
                 }
                 batch.add(first);
 
-                long startTime = System.currentTimeMillis();
+                long startTime = System.nanoTime();
                 while (batch.size() < batchSize && running) {
-                    long elapsed = System.currentTimeMillis() - startTime;
+                    // 用 nanoTime 计时：单调递增，不受系统校时（NTP/手动改时间）影响；
+                    // currentTimeMillis 在时钟回拨时会把攒批窗口无限拉长，前跳时又会瞬间截断
+                    long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime);
                     if (elapsed >= maxWaitMs) {
                         break;
                     }
