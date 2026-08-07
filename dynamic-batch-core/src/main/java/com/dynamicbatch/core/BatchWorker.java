@@ -29,14 +29,17 @@ public class BatchWorker<T> {
     private final long offerTimeoutMs;
     private final Consumer<List<T>> flushCallback;
     private final Consumer<List<T>> failureHandler;
+    /** 消费线程数：多条线程从同一队列竞争取数据、各自攒批各自 flush（分片并行，不保证顺序） */
+    private final int consumers;
 
     private volatile boolean running;
-    private Thread consumerThread;
+    private final List<Thread> consumerThreads = new ArrayList<>();
 
     private BatchWorker(Builder<T> builder) {
         this.type = builder.type;
         this.queueCapacity = builder.queueCapacity;
         this.batchSize = builder.batchSize;
+        this.consumers = builder.consumers;
         this.maxWaitMs = builder.maxWaitMs;
         this.offerTimeoutMs = builder.offerTimeoutMs;
         this.flushCallback = builder.flushCallback;
@@ -54,10 +57,13 @@ public class BatchWorker<T> {
 
     public void start() {
         running = true;
-        consumerThread = new Thread(this::consumeLoop, "batch-processor-" + name);
-        consumerThread.setDaemon(true);
-        consumerThread.start();
-        log.info("[{}] worker started, queueCapacity={}, batchSize={}", name, queueCapacity, batchSize);
+        for (int i = 0; i < consumers; i++) {
+            Thread thread = new Thread(this::consumeLoop, "batch-processor-" + name + "-" + i);
+            thread.setDaemon(true);
+            thread.start();
+            consumerThreads.add(thread);
+        }
+        log.info("[{}] worker started, consumers={}, queueCapacity={}, batchSize={}", name, consumers, queueCapacity, batchSize);
     }
 
     public boolean submit(T data) {
@@ -163,7 +169,7 @@ public class BatchWorker<T> {
     public void shutdown() {
         running = false;
 
-        if (consumerThread == null) {
+        if (consumerThreads.isEmpty()) {
             // 从未启动过，直接刷盘队列中剩余数据
             flushRemaining();
             log.info("[{}] worker stopped", name);
@@ -171,24 +177,28 @@ public class BatchWorker<T> {
         }
 
         // 消费线程最迟 WAKEUP_INTERVAL_MS 内感知停止信号并自然退出，
-        // 这里只需等它把手头批次处理完（含 flushCallback 耗时），与攒批窗口 maxWaitMs 无关
-        try {
-            consumerThread.join(BatchWorkerConstant.SHUTDOWN_WAIT_MS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("[{}] shutdown interrupted while waiting for consumer", name);
+        // 这里只需等它们把手头批次处理完（含 flushCallback 耗时），与攒批窗口 maxWaitMs 无关
+        for (Thread consumerThread : consumerThreads) {
+            try {
+                consumerThread.join(BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("[{}] shutdown interrupted while waiting for consumer", name);
+            }
         }
 
         // 超时仍存活：说明卡在慢回调/异常中，强制中断兜底
-        if (consumerThread.isAlive()) {
-            log.warn("[{}] consumer still alive after {}ms, forcing interrupt; " +
-                    "flushCallback may still be running, ensure it is thread-safe", name, BatchWorkerConstant.SHUTDOWN_WAIT_MS);
-            consumerThread.interrupt();
-            // 中断后再短暂等待，确保消费线程真正退出，避免与下方刷盘并发执行回调
-            try {
-                consumerThread.join(1000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        for (Thread consumerThread : consumerThreads) {
+            if (consumerThread.isAlive()) {
+                log.warn("[{}] consumer still alive after {}ms, forcing interrupt; " +
+                        "flushCallback may still be running, ensure it is thread-safe", name, BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+                consumerThread.interrupt();
+                // 中断后再短暂等待，确保消费线程真正退出，避免与下方刷盘并发执行回调
+                try {
+                    consumerThread.join(1000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
 
@@ -254,6 +264,8 @@ public class BatchWorker<T> {
         private long offerTimeoutMs = BatchWorkerConstant.DEFAULT_OFFER_TIMEOUT_MS;
         /** 失败回调，flush 抛异常时调用，可为 null（此时只打 error 日志） */
         private Consumer<List<T>> failureHandler;
+        /** 消费线程数：多条线程从同一队列竞争取数据、各自攒批各自 flush（分片并行，不保证顺序） */
+        private int consumers = BatchWorkerConstant.DEFAULT_CONSUMERS;
 
         private Builder(Class<T> type, Consumer<List<T>> flushCallback) {
             this.type = Objects.requireNonNull(type, "type must not be null");
@@ -285,6 +297,11 @@ public class BatchWorker<T> {
             return this;
         }
 
+        public Builder<T> consumers(int consumers) {
+            this.consumers = consumers;
+            return this;
+        }
+
         /**
          * 构建 {@code BatchWorker} 实例，执行参数校验。
          */
@@ -303,6 +320,9 @@ public class BatchWorker<T> {
             }
             if (offerTimeoutMs < 0) {
                 throw new IllegalArgumentException("offerTimeoutMs must be >= 0, got " + offerTimeoutMs);
+            }
+            if (consumers <= 0) {
+                throw new IllegalArgumentException("consumers must be > 0, got " + consumers);
             }
             return new BatchWorker<>(this);
         }

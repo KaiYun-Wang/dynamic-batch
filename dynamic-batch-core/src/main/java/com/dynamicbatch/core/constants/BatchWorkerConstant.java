@@ -17,4 +17,6 @@ public class BatchWorkerConstant {
     public static final long DEFAULT_MAX_WAIT_MS = 1000;
     /** 入队超时毫秒默认值 */
     public static final long DEFAULT_OFFER_TIMEOUT_MS = 100;
+    /** 消费线程数默认值 */
+    public static final int DEFAULT_CONSUMERS = 1;
 }
