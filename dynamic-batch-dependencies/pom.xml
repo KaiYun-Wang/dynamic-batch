@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- 空壳 BOM：后续统一对外管理各模块版本 -->
+    <groupId>com.dynamicbatch</groupId>
+    <artifactId>dynamic-batch-dependencies</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>dynamic-batch-dependencies</name>
+    <description>【空壳】对外 BOM，待填充</description>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.dynamicbatch</groupId>
+                <artifactId>dynamic-batch-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dynamicbatch</groupId>
+                <artifactId>dynamic-batch-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dynamicbatch</groupId>
+                <artifactId>dynamic-batch-spring</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dynamicbatch</groupId>
+                <artifactId>dynamic-batch-spring-boot-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>
