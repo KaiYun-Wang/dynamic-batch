@@ -4,6 +4,7 @@ import com.dynamicbatch.core.BatchProcessor;
 import com.dynamicbatch.core.BatchWorker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import org.springframework.context.annotation.Configuration;
 
 import javax.annotation.PostConstruct;
@@ -27,14 +28,15 @@ public class BatchProcessorConfiguration {
 
     @PostConstruct
     public void registerWriters() {
-        batchProcessor.register(DEMO_INSERT, DemoItem.class, new BatchWorker<>(
-                100,   // queueCapacity
-                5,     // batchSize
-                2000,  // maxWaitMs
-                100,   // offerTimeoutMs
-                batch -> log.info("demo flush ok, size={}, first={}", batch.size(), batch.get(0)),
-                failed -> log.error("demo flush failed, size={}", failed.size())
-        ));
+        batchProcessor.register(DEMO_INSERT,
+                BatchWorker.<DemoItem>builder(batch -> log.info("demo flush ok, size={}, first={}", batch.size(), batch.get(0)))
+                        .queueCapacity(100)
+                        .batchSize(5)
+                        .maxWaitMs(2000)
+                        .offerTimeoutMs(100)
+                        .failureHandler(failed -> log.error("demo flush failed, size={}", failed.size()))
+                        .build()
+        );
         log.info("批处理器注册完成: {}", DEMO_INSERT);
     }
 

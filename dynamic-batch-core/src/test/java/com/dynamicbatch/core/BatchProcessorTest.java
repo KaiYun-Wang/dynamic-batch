@@ -3,6 +3,8 @@ package com.dynamicbatch.core;
 import org.junit.After;
 import org.junit.Test;
 
+import com.dynamicbatch.core.BatchWorker;
+
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -34,8 +36,13 @@ public class BatchProcessorTest {
             latch.countDown();
         };
         // batchSize=3 凑满即 flush；maxWaitMs 只是攒批窗口，与关闭耗时无关
-        processor.register("demo", String.class, new BatchWorker<>(
-                100, 3, 2000, 1000, handler, null));
+        processor.register("demo",
+                BatchWorker.builder(handler)
+                        .queueCapacity(100)
+                        .batchSize(3)
+                        .maxWaitMs(2000)
+                        .offerTimeoutMs(1000)
+                        .build());
 
         assertTrue(processor.submit("demo", "a"));
         assertTrue(processor.submit("demo", "b"));
@@ -52,8 +59,13 @@ public class BatchProcessorTest {
 
         // maxWaitMs 故意给大值（模拟长时间攒批场景）：验证关闭耗时与其无关，
         // 消费线程每 WAKEUP_INTERVAL_MS 醒来检查一次停止信号，剩余数据由 shutdown 直接刷盘
-        processor.register("remain", Integer.class, new BatchWorker<>(
-                100, 100, 60_000, 1000, handler, null));
+        processor.register("remain",
+                BatchWorker.builder(handler)
+                        .queueCapacity(100)
+                        .batchSize(100)
+                        .maxWaitMs(60_000)
+                        .offerTimeoutMs(1000)
+                        .build());
 
         assertTrue(processor.submit("remain", 1));
         assertTrue(processor.submit("remain", 2));

@@ -21,10 +21,9 @@ public class BatchProcessor {
      * 注册 Worker。
      *
      * @param key    唯一标识，建议「类名:业务名」，如 DeviceDTO:insert
-     * @param type   元素类型（编译期约束 + 日志；运行时泛型会擦除，队列实际类型由 worker 决定）
      * @param worker 已构造好的 Worker（含队列参数与回调）
      */
-    public <T> void register(String key, Class<T> type, BatchWorker<T> worker) {
+    public <T> void register(String key, BatchWorker<T> worker) {
         worker.setName(key);
         BatchWorker<?> previous = workerMap.put(key, worker);
         if (previous != null) {
@@ -32,13 +31,13 @@ public class BatchProcessor {
             previous.shutdown();
         }
         worker.start();
-        log.info("registered worker: key={}, type={}", key, type.getSimpleName());
+        log.info("registered worker: key={}", key);
     }
 
     /**
      * 提交一条数据。
      *
-     * @return true 入队成功；false 队列满且超时（或 key 不存在）
+     * @return true 入队成功；false 队列满且超时（或 key 不存在、worker 已关闭）
      */
     @SuppressWarnings("unchecked")
     public <T> boolean submit(String key, T data) throws InterruptedException {
