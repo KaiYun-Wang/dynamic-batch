@@ -37,7 +37,7 @@ public class BatchProcessorTest {
         };
         // batchSize=3 凑满即 flush；maxWaitMs 只是攒批窗口，与关闭耗时无关
         processor.register("demo",
-                BatchWorker.builder(handler)
+                BatchWorker.builder(String.class, handler)
                         .queueCapacity(100)
                         .batchSize(3)
                         .maxWaitMs(2000)
@@ -60,7 +60,7 @@ public class BatchProcessorTest {
         // maxWaitMs 故意给大值（模拟长时间攒批场景）：验证关闭耗时与其无关，
         // 消费线程每 WAKEUP_INTERVAL_MS 醒来检查一次停止信号，剩余数据由 shutdown 直接刷盘
         processor.register("remain",
-                BatchWorker.builder(handler)
+                BatchWorker.builder(Integer.class, handler)
                         .queueCapacity(100)
                         .batchSize(100)
                         .maxWaitMs(60_000)
@@ -73,5 +73,21 @@ public class BatchProcessorTest {
         processor = null;
 
         assertEquals(2, flushed.size());
+    }
+
+    @Test
+    public void submitShouldRejectWrongType() throws Exception {
+        processor = new BatchProcessor();
+        processor.register("typed",
+                BatchWorker.builder(String.class, batch -> {
+                })
+                        .batchSize(10)
+                        .build());
+
+        assertTrue(processor.submit("typed", "ok"));
+        // 错误类型在 submit 处被拒（fail fast），不会混入队列
+        assertTrue(!processor.submit("typed", 123));
+        processor.shutdown();
+        processor = null;
     }
 }

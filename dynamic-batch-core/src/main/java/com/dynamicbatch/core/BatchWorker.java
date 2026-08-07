@@ -18,6 +18,8 @@ public class BatchWorker<T> {
     private static final Logger log = LoggerFactory.getLogger(BatchWorker.class);
 
     private String name;
+    /** 数据类型，submit 时做运行时校验（fail fast），避免错误类型混入队列 */
+    private final Class<T> type;
     private final LinkedBlockingQueue<T> queue;
     private final int queueCapacity;
     private final int batchSize;
@@ -30,6 +32,7 @@ public class BatchWorker<T> {
     private Thread consumerThread;
 
     private BatchWorker(Builder<T> builder) {
+        this.type = builder.type;
         this.queueCapacity = builder.queueCapacity;
         this.batchSize = builder.batchSize;
         this.maxWaitMs = builder.maxWaitMs;
@@ -55,17 +58,31 @@ public class BatchWorker<T> {
         log.info("[{}] worker started, queueCapacity={}, batchSize={}", name, queueCapacity, batchSize);
     }
 
-    public boolean submit(T data) throws InterruptedException {
+    public boolean submit(T data) {
         // 已关闭则直接拒绝：避免「返回 true 但数据入队后无人消费」的静默丢失
         if (!running) {
             log.warn("[{}] submit rejected, worker not running", name);
             return false;
         }
-        boolean ok = queue.offer(data, offerTimeoutMs, TimeUnit.MILLISECONDS);
-        if (!ok) {
-            log.warn("[{}] queue full, offer timed out after {}ms", name, offerTimeoutMs);
+        // 类型校验（fail fast）：错误类型的数据在业务线程就拒绝，
+        // 否则会混入队列，直到消费端 flush 时整批抛 ClassCastException
+        // 注：isInstance(null) 为 false，null 数据也会被拒绝
+        if (!type.isInstance(data)) {
+            log.error("[{}] submit rejected, type mismatch: expected={}, got={}",
+                    name, type.getName(), data == null ? "null" : data.getClass().getName());
+            return false;
         }
-        return ok;
+        try {
+            boolean ok = queue.offer(data, offerTimeoutMs, TimeUnit.MILLISECONDS);
+            if (!ok) {
+                log.warn("[{}] queue full, offer timed out after {}ms", name, offerTimeoutMs);
+            }
+            return ok;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();   // 关键：恢复中断标志
+            log.warn("[{}] submit interrupted", name);
+            return false;
+        }
     }
 
     private void consumeLoop() {
@@ -194,28 +211,33 @@ public class BatchWorker<T> {
     // ======================== Builder ========================
 
     /**
-     * 创建 {@code BatchWorker} 构建器，{@code flushCallback} 为必填参数。
+     * 创建 {@code BatchWorker} 构建器，{@code type} 与 {@code flushCallback} 为必填参数。
+     *
+     * <p>{@code type} 用于 submit 时的运行时类型校验；同时编译器可据此推断泛型，
+     * 调用点无需显式写 {@code <T>}。
      *
      * <p>用法：
      * <pre>{@code
-     * BatchWorker<MyData> worker = BatchWorker.builder(records -> insertBatch(records))
+     * BatchWorker<MyData> worker = BatchWorker.builder(MyData.class, records -> insertBatch(records))
      *         .batchSize(100)
      *         .maxWaitMs(2000)
      *         .build();
      * }</pre>
      */
-    public static <T> Builder<T> builder(Consumer<List<T>> flushCallback) {
-        return new Builder<>(flushCallback);
+    public static <T> Builder<T> builder(Class<T> type, Consumer<List<T>> flushCallback) {
+        return new Builder<>(type, flushCallback);
     }
 
     /**
      * {@code BatchWorker} 构建器。
      *
-     * <p>通过 {@link #builder(Consumer)} 创建，{@code flushCallback} 在构造时传入保证必填，
-     * 其余参数有默认值（见 {@link BatchWorkerConstant}），可按需覆盖。
+     * <p>通过 {@link #builder(Class, Consumer)} 创建，{@code type} 与 {@code flushCallback}
+     * 在构造时传入保证必填，其余参数有默认值（见 {@link BatchWorkerConstant}），可按需覆盖。
      */
     public static class Builder<T> {
 
+        /** 数据类型，submit 时做运行时校验，必填 */
+        private final Class<T> type;
         /** 刷盘回调，攒满一批或超时触发时调用，必填 */
         private final Consumer<List<T>> flushCallback;
         /** 队列容量，超过此值入队会阻塞直到超时 */
@@ -229,7 +251,8 @@ public class BatchWorker<T> {
         /** 失败回调，flush 抛异常时调用，可为 null（此时只打 error 日志） */
         private Consumer<List<T>> failureHandler;
 
-        private Builder(Consumer<List<T>> flushCallback) {
+        private Builder(Class<T> type, Consumer<List<T>> flushCallback) {
+            this.type = Objects.requireNonNull(type, "type must not be null");
             this.flushCallback = Objects.requireNonNull(flushCallback, "flushCallback must not be null");
         }
 
@@ -267,6 +290,9 @@ public class BatchWorker<T> {
             }
             if (queueCapacity <= 0) {
                 throw new IllegalArgumentException("queueCapacity must be > 0, got " + queueCapacity);
+            }
+            if (batchSize > queueCapacity) {
+                throw new IllegalArgumentException("batchSize must be <= queueCapacity, got batchSize:" + batchSize + " > queueCapacity:" + queueCapacity);
             }
             if (maxWaitMs < 0) {
                 throw new IllegalArgumentException("maxWaitMs must be >= 0, got " + maxWaitMs);

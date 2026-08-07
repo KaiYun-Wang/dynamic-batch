@@ -29,7 +29,7 @@ public class BatchProcessorConfiguration {
     @PostConstruct
     public void registerWriters() {
         batchProcessor.register(DEMO_INSERT,
-                BatchWorker.<DemoItem>builder(batch -> log.info("demo flush ok, size={}, first={}", batch.size(), batch.get(0)))
+                BatchWorker.builder(DemoItem.class, batch -> log.info("demo flush ok, size={}, first={}", batch.size(), batch.get(0)))
                         .queueCapacity(100)
                         .batchSize(5)
                         .maxWaitMs(2000)

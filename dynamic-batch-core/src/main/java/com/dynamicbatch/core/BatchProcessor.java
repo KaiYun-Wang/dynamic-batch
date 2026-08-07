@@ -40,7 +40,7 @@ public class BatchProcessor {
      * @return true 入队成功；false 队列满且超时（或 key 不存在、worker 已关闭）
      */
     @SuppressWarnings("unchecked")
-    public <T> boolean submit(String key, T data) throws InterruptedException {
+    public <T> boolean submit(String key, T data) {
         BatchWorker<T> worker = (BatchWorker<T>) workerMap.get(key);
         if (worker == null) {
             log.error("worker not found: key={}", key);
