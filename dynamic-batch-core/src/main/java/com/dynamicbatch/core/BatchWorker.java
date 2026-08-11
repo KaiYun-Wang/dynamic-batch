@@ -1,6 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.core.constants.BatchWorkerConstant;
+import com.dynamicbatch.core.pojo.BatchWorkerConfigPOJO;
 import com.dynamicbatch.core.queue.VariableLinkedBlockingQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -8,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 
@@ -20,20 +22,24 @@ public class BatchWorker<T> {
     private String name;
     /** 数据类型，submit 时做运行时校验（fail fast），避免错误类型混入队列 */
     private final Class<T> type;
-    // TODO 热更新：后续接入配置中心后，通过 queue.setCapacity(newCapacity) 动态调整容量。
-    // 注意事项：新容量必须 >= batchSize，否则攒批永远等不满，build() 的 batchSize <= queueCapacity 校验在运行时不再成立。
     private final VariableLinkedBlockingQueue<T> queue;
-    private final int queueCapacity;
-    private final int batchSize;
-    private final long maxWaitMs;
-    private final long offerTimeoutMs;
+    /** 当前队列容量，热更新时通过 queue.setCapacity 动态调整；新容量必须 >= batchSize（见 refresh 校验） */
+    private volatile int queueCapacity;
+    /** 攒批条数，热更新后下一批即生效 */
+    private volatile int batchSize;
+    /** 最大等待毫秒，热更新后攒批窗口即时生效 */
+    private volatile long maxWaitMs;
+    /** 入队超时毫秒，热更新后新的 submit 调用生效 */
+    private volatile long offerTimeoutMs;
     private final Consumer<List<T>> flushCallback;
     private final Consumer<List<T>> failureHandler;
-    /** 消费线程数：多条线程从同一队列竞争取数据、各自攒批各自 flush（分片并行，不保证顺序） */
-    private final int consumers;
+    /** 期望消费线程数：多条线程从同一队列竞争取数据、各自攒批各自 flush（分片并行，不保证顺序） */
+    private volatile int consumers;
 
     private volatile boolean running;
     private final List<Thread> consumerThreads = new ArrayList<>();
+    /** 与 consumerThreads 平行的每线程停止标志：refresh 缩线程时置位，线程感知后自然退出 */
+    private final List<AtomicBoolean> consumerStopFlags = new ArrayList<>();
 
     private BatchWorker(Builder<T> builder) {
         this.type = builder.type;
@@ -55,15 +61,84 @@ public class BatchWorker<T> {
         return name;
     }
 
-    public void start() {
+    public synchronized void start() {
         running = true;
         for (int i = 0; i < consumers; i++) {
-            Thread thread = new Thread(this::consumeLoop, "batch-processor-" + name + "-" + i);
-            thread.setDaemon(true);
-            thread.start();
-            consumerThreads.add(thread);
+            startConsumerThread(i);
         }
         log.info("[{}] worker started, consumers={}, queueCapacity={}, batchSize={}", name, consumers, queueCapacity, batchSize);
+    }
+
+    /**
+     * 热更新配置，{@code null} 字段表示不更新。
+     *
+     * <p>batchSize/maxWaitMs/offerTimeoutMs 即时生效；queueCapacity 通过
+     * {@link VariableLinkedBlockingQueue#setCapacity(int)} 动态调整；consumers 增则新建消费线程，
+     * 减则等待多余线程自然退出（复用优雅关闭模式）。校验规则与 {@link Builder#build()} 一致，
+     * 失败抛 {@link IllegalArgumentException}。
+     */
+    public synchronized void refresh(BatchWorkerConfigPOJO config) {
+        int newQueueCapacity = config.getQueueCapacity() != null ? config.getQueueCapacity() : this.queueCapacity;
+        int newBatchSize = config.getBatchSize() != null ? config.getBatchSize() : this.batchSize;
+        long newMaxWaitMs = config.getMaxWaitMs() != null ? config.getMaxWaitMs() : this.maxWaitMs;
+        long newOfferTimeoutMs = config.getOfferTimeoutMs() != null ? config.getOfferTimeoutMs() : this.offerTimeoutMs;
+        int newConsumers = config.getConsumers() != null ? config.getConsumers() : this.consumers;
+
+        // 统一校验（与 build() 共用同一套规则），保证攒批等运行时约束仍然成立
+        validateParams(newQueueCapacity, newBatchSize, newMaxWaitMs, newOfferTimeoutMs, newConsumers);
+
+        this.queueCapacity = newQueueCapacity;
+        this.batchSize = newBatchSize;
+        this.maxWaitMs = newMaxWaitMs;
+        this.offerTimeoutMs = newOfferTimeoutMs;
+        this.consumers = newConsumers;
+
+        queue.setCapacity(newQueueCapacity);
+        adjustConsumers(newConsumers);
+        log.info("[{}] config refreshed, consumers={}, queueCapacity={}, batchSize={}, maxWaitMs={}, offerTimeoutMs={}",
+                name, consumers, queueCapacity, batchSize, maxWaitMs, offerTimeoutMs);
+    }
+
+    /** 启动一条消费线程并登记其停止标志 */
+    private void startConsumerThread(int index) {
+        AtomicBoolean stopFlag = new AtomicBoolean(false);
+        Thread thread = new Thread(() -> consumeLoop(stopFlag), "batch-processor-" + name + "-" + index);
+        thread.setDaemon(true);
+        thread.start();
+        consumerThreads.add(thread);
+        consumerStopFlags.add(stopFlag);
+    }
+
+    /**
+     * 调整消费线程数：增则新建线程；减则置停止标志，等待其处理完手头批次自然退出。
+     */
+    private void adjustConsumers(int target) {
+        int current = consumerThreads.size();
+        if (target > current) {
+            for (int i = current; i < target; i++) {
+                startConsumerThread(i);
+            }
+            log.info("[{}] consumers increased: {} -> {}", name, current, target);
+        } else if (target < current) {
+            // 从尾部开始回收多余线程；消费线程最迟 WAKEUP_INTERVAL_MS 感知停止标志并退出
+            for (int i = current; i > target; i--) {
+                int idx = consumerThreads.size() - 1;
+                consumerStopFlags.remove(idx).set(true);
+                Thread thread = consumerThreads.remove(idx);
+                try {
+                    thread.join(BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("[{}] interrupted while waiting for consumer to stop", name);
+                }
+                if (thread.isAlive()) {
+                    log.warn("[{}] consumer still alive after {}ms, forcing interrupt",
+                            name, BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+                    thread.interrupt();
+                }
+            }
+            log.info("[{}] consumers decreased: {} -> {}", name, current, target);
+        }
     }
 
     public boolean submit(T data) {
@@ -93,9 +168,9 @@ public class BatchWorker<T> {
         }
     }
 
-    private void consumeLoop() {
+    private void consumeLoop(AtomicBoolean stopFlag) {
         List<T> batch = new ArrayList<>(batchSize);
-        while (running) {
+        while (running && !stopFlag.get()) {
             try {
                 // 用限时 poll 代替阻塞 take：running=false 后最迟 WAKEUP_INTERVAL_MS 感知到停止信号，
                 // 不会被攒批窗口（maxWaitMs 可能很大）卡住，关闭响应与攒批时长彻底解耦
@@ -166,7 +241,7 @@ public class BatchWorker<T> {
      * 优雅关闭
      * <p>先等消费线程自然退出，超时则强制中断，最后分批刷盘队列中剩余数据</p>
      */
-    public void shutdown() {
+    public synchronized void shutdown() {
         running = false;
 
         if (consumerThreads.isEmpty()) {
@@ -219,6 +294,33 @@ public class BatchWorker<T> {
                 int end = Math.min(i + batchSize, remaining.size());
                 flushBatch(remaining.subList(i, end));
             }
+        }
+    }
+
+    // ======================== 参数校验 ========================
+
+    /**
+     * 参数合法性校验，{@link Builder#build()} 与 {@link #refresh(BatchWorkerConfigPOJO)} 共用：
+     * 非法参数抛 {@link IllegalArgumentException}。
+     */
+    private static void validateParams(int queueCapacity, int batchSize, long maxWaitMs, long offerTimeoutMs, int consumers) {
+        if (batchSize <= 0) {
+            throw new IllegalArgumentException("batchSize must be > 0, got " + batchSize);
+        }
+        if (queueCapacity <= 0) {
+            throw new IllegalArgumentException("queueCapacity must be > 0, got " + queueCapacity);
+        }
+        if (batchSize > queueCapacity) {
+            throw new IllegalArgumentException("batchSize must be <= queueCapacity, got batchSize:" + batchSize + " > queueCapacity:" + queueCapacity);
+        }
+        if (maxWaitMs < 0) {
+            throw new IllegalArgumentException("maxWaitMs must be >= 0, got " + maxWaitMs);
+        }
+        if (offerTimeoutMs < 0) {
+            throw new IllegalArgumentException("offerTimeoutMs must be >= 0, got " + offerTimeoutMs);
+        }
+        if (consumers <= 0) {
+            throw new IllegalArgumentException("consumers must be > 0, got " + consumers);
         }
     }
 
@@ -306,24 +408,7 @@ public class BatchWorker<T> {
          * 构建 {@code BatchWorker} 实例，执行参数校验。
          */
         public BatchWorker<T> build() {
-            if (batchSize <= 0) {
-                throw new IllegalArgumentException("batchSize must be > 0, got " + batchSize);
-            }
-            if (queueCapacity <= 0) {
-                throw new IllegalArgumentException("queueCapacity must be > 0, got " + queueCapacity);
-            }
-            if (batchSize > queueCapacity) {
-                throw new IllegalArgumentException("batchSize must be <= queueCapacity, got batchSize:" + batchSize + " > queueCapacity:" + queueCapacity);
-            }
-            if (maxWaitMs < 0) {
-                throw new IllegalArgumentException("maxWaitMs must be >= 0, got " + maxWaitMs);
-            }
-            if (offerTimeoutMs < 0) {
-                throw new IllegalArgumentException("offerTimeoutMs must be >= 0, got " + offerTimeoutMs);
-            }
-            if (consumers <= 0) {
-                throw new IllegalArgumentException("consumers must be > 0, got " + consumers);
-            }
+            validateParams(queueCapacity, batchSize, maxWaitMs, offerTimeoutMs, consumers);
             return new BatchWorker<>(this);
         }
     }

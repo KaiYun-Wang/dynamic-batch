@@ -1,5 +1,6 @@
 package com.dynamicbatch.core;
 
+import com.dynamicbatch.core.pojo.BatchWorkerConfigPOJO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,6 +48,24 @@ public class BatchProcessor {
             return false;
         }
         return worker.submit(data);
+    }
+
+    /**
+     * 热更新指定 Worker 的配置，{@code null} 字段不更新。
+     *
+     * <p>batchSize/maxWaitMs/offerTimeoutMs/queueCapacity/consumers 均可动态调整，
+     * 校验失败抛 {@link IllegalArgumentException}。
+     *
+     * @return true 更新成功；false key 不存在
+     */
+    public boolean refresh(String key, BatchWorkerConfigPOJO config) {
+        BatchWorker<?> worker = workerMap.get(key);
+        if (worker == null) {
+            log.error("worker not found: key={}", key);
+            return false;
+        }
+        worker.refresh(config);
+        return true;
     }
 
     /** 关闭所有 Worker，并尽量刷掉剩余数据 */
