@@ -11,12 +11,12 @@
 
     <artifactId>example-boot27</artifactId>
     <name>example-boot27</name>
-    <description>示例：只依赖 core，用法对齐 yikekong BatchWriterConfiguration</description>
+    <description>示例：依赖 starter 自动装配，用法对齐 yikekong BatchWriterConfiguration</description>
 
     <dependencies>
         <dependency>
             <groupId>com.dynamicbatch</groupId>
-            <artifactId>dynamic-batch-core</artifactId>
+            <artifactId>dynamic-batch-spring-boot-starter</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

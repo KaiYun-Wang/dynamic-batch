@@ -11,12 +11,17 @@
 
     <artifactId>dynamic-batch-spring</artifactId>
     <name>dynamic-batch-spring</name>
-    <description>【空壳】Spring 胶水层，待填充</description>
+    <description>Spring 集成层：自动配置 BatchProcessor 单例 Bean</description>
 
     <dependencies>
         <dependency>
             <groupId>com.dynamicbatch</groupId>
             <artifactId>dynamic-batch-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+            <optional>true</optional>
         </dependency>
     </dependencies>
 </project>
