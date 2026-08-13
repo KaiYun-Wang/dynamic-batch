@@ -14,6 +14,16 @@ import java.lang.reflect.Type;
 public class HutoolJsonParser implements JsonParser {
 
     @Override
+    public boolean supports() {
+        try {
+            Class.forName("cn.hutool.json.JSONUtil");
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+    }
+
+    @Override
     public String toJson(Object obj) {
         return JSONUtil.toJsonStr(obj);
     }

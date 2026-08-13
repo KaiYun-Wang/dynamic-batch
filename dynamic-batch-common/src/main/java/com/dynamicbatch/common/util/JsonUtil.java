@@ -24,13 +24,19 @@ public class JsonUtil {
     static {
         JsonParser parser = null;
         List<JsonParser> parsers = ExtensionServiceLoader.get(JsonParser.class);
-        if (parsers != null && !parsers.isEmpty()) {
-            parser = parsers.get(0);
-            log.info("JsonUtil using parser: {}", parser.getClass().getName());
+        if (parsers != null) {
+            for (JsonParser p : parsers) {
+                if (p.supports()) {
+                    parser = p;
+                    break;
+                }
+            }
         }
         if (parser == null) {
             parser = new SimpleJsonParser();
             log.info("JsonUtil using fallback parser: SimpleJsonParser");
+        } else {
+            log.info("JsonUtil using parser: {}", parser.getClass().getName());
         }
         JSON_PARSER = parser;
     }

@@ -19,15 +19,15 @@ import static org.junit.Assert.assertTrue;
 public class DingNotifierTest {
 
     // ========== 真实钉钉机器人集成测试 ==========
-    @Test
-    public void testRealDingTalkSend() {
-        NotifyPlatformPOJO platform = new NotifyPlatformPOJO();
-        platform.setWebhook(""); //填自己机器人的webhook和secret
-        platform.setSecret("");
-        platform.setReceivers("all");
-        platform.setTimeout(5000);
-        notifier.send(platform, "## Dynamic-Batch 测试消息\n\n这是一条来自\n\n- DingNotifierTest 的\n\n**集成测试**消息");
-    }
+//    @Test
+//    public void testRealDingTalkSend() {
+//        NotifyPlatformPOJO platform = new NotifyPlatformPOJO();
+//        platform.setWebhook(""); //填自己机器人的webhook和secret
+//        platform.setSecret("");
+//        platform.setReceivers("all");
+//        platform.setTimeout(5000);
+//        notifier.send(platform, "## Dynamic-Batch 测试消息\n\n这是一条来自\n\n- DingNotifierTest 的\n\n**集成测试**消息");
+//    }
 
     private final DingNotifier notifier = new DingNotifier();
 

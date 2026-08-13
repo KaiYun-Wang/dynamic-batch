@@ -39,4 +39,17 @@ public interface JsonParser {
      * @return 反序列化结果
      */
     <T> T fromJson(String json, Type type);
+
+    /**
+     * 检查当前 classpath 是否满足本实现运行所需的依赖。
+     *
+     * <p>适配器必须覆写：实现依赖的库不在 classpath 时返回 false，
+     * 避免"实例能 new 出来但运行时才炸"（类加载是懒的，方法体里的引用
+     * 只有执行到时才触发加载）。默认返回 true，兜底实现无需覆写。
+     *
+     * @return true 可用；false 跳过本实现
+     */
+    default boolean supports() {
+        return true;
+    }
 }

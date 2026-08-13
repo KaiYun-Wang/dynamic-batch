@@ -11,12 +11,12 @@
 
     <artifactId>dynamic-batch-core</artifactId>
     <name>dynamic-batch-core</name>
-    <description>进程内攒批引擎（对齐 yikekong BatchWriter 逻辑）</description>
+    <description>进程内攒批引擎</description>
 
     <dependencies>
         <dependency>
             <groupId>cn.hutool</groupId>
-            <artifactId>hutool-all</artifactId>
+            <artifactId>hutool-http</artifactId>
         </dependency>
         <dependency>
             <groupId>com.dynamicbatch</groupId>
