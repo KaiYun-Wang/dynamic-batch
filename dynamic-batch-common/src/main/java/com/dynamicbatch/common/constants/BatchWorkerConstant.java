@@ -1,4 +1,4 @@
-package com.dynamicbatch.core.constants;
+package com.dynamicbatch.common.constants;
 
 
 /**

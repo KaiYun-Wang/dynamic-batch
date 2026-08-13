@@ -1,8 +1,8 @@
 package com.dynamicbatch.core;
 
-import com.dynamicbatch.core.constants.BatchWorkerConstant;
-import com.dynamicbatch.core.pojo.BatchWorkerConfigPOJO;
-import com.dynamicbatch.core.queue.VariableLinkedBlockingQueue;
+import com.dynamicbatch.common.constants.BatchWorkerConstant;
+import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.common.queue.VariableLinkedBlockingQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.ArrayList;

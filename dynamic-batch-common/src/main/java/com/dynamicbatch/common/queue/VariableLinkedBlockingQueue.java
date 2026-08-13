@@ -39,8 +39,7 @@
  * Expert Group and released to the public domain, as explained at
  * https://creativecommons.org/licenses/publicdomain
  */
-package com.dynamicbatch.core.queue;
-
+package com.dynamicbatch.common.queue;
 
 import java.util.AbstractQueue;
 import java.util.Collection;

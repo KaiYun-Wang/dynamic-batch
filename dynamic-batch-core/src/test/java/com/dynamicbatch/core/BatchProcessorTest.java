@@ -4,7 +4,7 @@ import org.junit.After;
 import org.junit.Test;
 
 import com.dynamicbatch.core.BatchWorker;
-import com.dynamicbatch.core.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
 
 import java.util.ArrayList;
 import java.util.HashMap;

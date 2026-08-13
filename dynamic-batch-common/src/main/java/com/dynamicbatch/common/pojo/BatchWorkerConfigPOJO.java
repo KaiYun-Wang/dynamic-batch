@@ -1,4 +1,5 @@
-package com.dynamicbatch.core.pojo;
+package com.dynamicbatch.common.pojo;
+
 
 /**
  * BatchWorker 热更新配置 POJO。

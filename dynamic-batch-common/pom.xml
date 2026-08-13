@@ -11,5 +11,21 @@
 
     <artifactId>dynamic-batch-common</artifactId>
     <name>dynamic-batch-common</name>
-    <description>【空壳】公共模型 / 枚举 / 常量，待填充</description>
+    <description>公共模型 / 工具 / SPI 框架</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>cn.hutool</groupId>
+            <artifactId>hutool-all</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 </project>
