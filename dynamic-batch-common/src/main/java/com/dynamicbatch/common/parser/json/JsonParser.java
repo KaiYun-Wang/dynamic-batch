@@ -6,8 +6,10 @@ import java.lang.reflect.Type;
  * JSON 序列化 / 反序列化 SPI 接口。
  *
  * <p>通过 {@link java.util.ServiceLoader} 加载，实现类可在不修改核心代码的前提下
- * 替换 JSON 引擎。默认提供 {@link HutoolJsonParser}（依赖 hutool-json）和
- * {@link SimpleJsonParser}（零依赖内置兜底）。
+ * 替换 JSON 引擎。按 META-INF/services 声明顺序探测（即优先级），依次为
+ * {@link JacksonJsonParser}（依赖 jackson-databind + jsr310）、
+ * {@link FastJsonParser}（依赖 fastjson）、{@link HutoolJsonParser}（依赖 hutool-json），
+ * 全部不可用时回退 {@link SimpleJsonParser}（零依赖内置兜底）。
  * 设计参考 dromara dynamic-tp 的 common/parser/json/JsonParser。
  */
 public interface JsonParser {

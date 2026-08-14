@@ -28,6 +28,7 @@
         <spring-boot.version>2.7.18</spring-boot.version>
         <slf4j.version>1.7.36</slf4j.version>
         <hutool.version>5.8.16</hutool.version>
+        <fastjson.version>1.2.83</fastjson.version>
         <junit.version>4.13.2</junit.version>
 
         <maven-compiler-plugin.version>3.11.0</maven-compiler-plugin.version>
@@ -77,6 +78,11 @@
                 <groupId>cn.hutool</groupId>
                 <artifactId>hutool-json</artifactId>
                 <version>${hutool.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>fastjson</artifactId>
+                <version>${fastjson.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.slf4j</groupId>

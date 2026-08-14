@@ -1,1 +1,3 @@
+com.dynamicbatch.common.parser.json.JacksonJsonParser
+com.dynamicbatch.common.parser.json.FastJsonParser
 com.dynamicbatch.common.parser.json.HutoolJsonParser

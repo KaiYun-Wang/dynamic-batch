@@ -11,17 +11,9 @@ import java.lang.reflect.Type;
  * <p>当 classpath 中存在 hutool-all 时通过 META-INF/services 自动加载。
  * 适配器结构参考 dromara dynamic-tp 的 JacksonParser / GsonParser。
  */
-public class HutoolJsonParser implements JsonParser {
+public class HutoolJsonParser extends AbstractJsonParser {
 
-    @Override
-    public boolean supports() {
-        try {
-            Class.forName("cn.hutool.json.JSONUtil");
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
-    }
+    private static final String HUTOOL_JSON_CLASS_NAME = "cn.hutool.json.JSONUtil";
 
     @Override
     public String toJson(Object obj) {
@@ -38,5 +30,10 @@ public class HutoolJsonParser implements JsonParser {
     @SuppressWarnings("unchecked")
     public <T> T fromJson(String json, Type type) {
         return (T) new JSONObject(json).toBean(type);
+    }
+
+    @Override
+    protected String[] getMapperClassNames() {
+        return new String[]{HUTOOL_JSON_CLASS_NAME};
     }
 }

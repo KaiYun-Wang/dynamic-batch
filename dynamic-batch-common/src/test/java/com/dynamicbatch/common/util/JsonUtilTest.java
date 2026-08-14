@@ -5,6 +5,7 @@ import org.junit.Test;
 import java.util.HashMap;
 import java.util.Map;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public class JsonUtilTest {
@@ -38,5 +39,14 @@ public class JsonUtilTest {
         String json = JsonUtil.toJson(map);
         assertTrue(json.contains("\"x\""));
         assertTrue(json.contains("\"y\""));
+    }
+
+    @Test
+    public void testFromJsonBasicMap() {
+        Map<String, Object> map = new HashMap<>();
+        map.put("key", "value");
+
+        Map<String, Object> back = JsonUtil.fromJson(JsonUtil.toJson(map), Map.class);
+        assertEquals("value", back.get("key"));
     }
 }
