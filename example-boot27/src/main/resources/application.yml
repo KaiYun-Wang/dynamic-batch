@@ -3,20 +3,29 @@ logging:
     com.dynamicbatch: INFO
 
 # ========== 通知配置（自测用）==========
-# 填好下方钉钉机器人 webhook / secret 后启动，
-# 调 POST /notify/ding?content=xxx 即可向钉钉发一条测试消息。
+# 填好下方机器人配置后启动：
+#   POST /notify/ding?content=xxx
+#   POST /notify/wechat?content=xxx
 dynamic-batch:
   notify:
     platforms:
-      - platform: ding
-        # TODO 钉钉机器人 webhook，形如：
-        # https://oapi.dingtalk.com/robot/send?access_token=你的token
+#      - platform: ding
+#        # TODO 钉钉机器人 webhook，形如：
+#        # https://oapi.dingtalk.com/robot/send?access_token=你的token
+#        webhook: ""
+#        # TODO 机器人安全设置选“加签”时的密钥；非加签模式留空
+#        secret: ""
+#        # webhook 未携带 access_token 时，也可在此填 token（与 webhook 二选一）
+#        # urlKey: ""
+#        # @ 的手机号，逗号分隔；"all" 或留空 = @所有人
+#        receivers: "all"
+#        # HTTP 超时毫秒
+#        timeout: 3000
+      - platform: wechat
+        # TODO 企业微信群机器人 webhook，形如：
+        # https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key
         webhook: ""
-        # TODO 机器人安全设置选“加签”时的密钥；非加签模式留空
-        secret: ""
-        # webhook 未携带 access_token 时，也可在此填 token（与 webhook 二选一）
+        # webhook 未携带 key 时，也可在此填 key（与 webhook 二选一）
         # urlKey: ""
-        # @ 的手机号，逗号分隔；"all" 或留空 = @所有人
-        receivers: "all"
-        # HTTP 超时毫秒
         timeout: 3000
+

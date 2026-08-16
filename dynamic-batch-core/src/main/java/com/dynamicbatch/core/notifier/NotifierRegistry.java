@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 通知渠道注册表。
  *
  * <p>单例；按平台名维护渠道实例，发送时根据 {@link NotifyPlatformPOJO#getPlatform()}
- * 找到对应渠道并委托。构造时注册内置渠道（当前为钉钉），外部渠道通过
+ * 找到对应渠道并委托。构造时注册内置渠道（钉钉、企业微信），外部渠道通过
  * {@link #register} 追加，无需改动本类。
  * 设计参考 dromara dynamic-tp 的 core/handler/NotifierHandler。
  */
@@ -23,6 +23,7 @@ public class NotifierRegistry {
 
     private NotifierRegistry() {
         register(new DingNotifier());
+        register(new WechatNotifier());
     }
 
     public static NotifierRegistry getInstance() {

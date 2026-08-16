@@ -27,7 +27,11 @@ public class NotifyPlatformPOJO {
     /** 加签密钥（HTTP 机器人渠道用），配置后请求自动携带 timestamp + sign */
     private String secret;
 
-    /** 收件人，逗号分隔（钉钉/企微为 @ 的手机号，邮箱渠道为收件地址；"all" 或空表示 @所有人） */
+    /**
+     * 收件人，逗号分隔。
+     * 钉钉为 @ 的手机号；企微 markdown 需在正文写 {@code <@userid>}（本字段暂不参与拼装）；
+     * 邮箱渠道为收件地址；"all" 或空表示 @所有人（钉钉）。
+     */
     private String receivers = "all";
 
     /** HTTP 请求超时毫秒 */
