@@ -1,4 +1,4 @@
-package com.dynamicbatch.core.notifier;
+package com.dynamicbatch.core.notifier.channel;
 
 import cn.hutool.http.HttpRequest;
 import com.dynamicbatch.common.enums.NotifyPlatformEnum;
@@ -7,7 +7,7 @@ import com.dynamicbatch.common.util.JsonUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -60,9 +60,10 @@ public class WechatNotifier extends AbstractNotifier {
      * 构建企微 markdown 消息体（字段为 content，无 title）。
      */
     protected String buildBody(String content) {
-        Map<String, Object> req = new HashMap<>();
+        // LinkedHashMap 保持插入序，保证任意 JsonParser 序列化输出的键序一致
+        Map<String, Object> req = new LinkedHashMap<>();
         req.put("msgtype", "markdown");
-        Map<String, Object> markdown = new HashMap<>();
+        Map<String, Object> markdown = new LinkedHashMap<>();
         markdown.put("content", content);
         req.put("markdown", markdown);
         return JsonUtil.toJson(req);

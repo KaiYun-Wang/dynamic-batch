@@ -99,6 +99,19 @@ public class BatchWorker<T> {
                 name, consumers, queueCapacity, batchSize, maxWaitMs, offerTimeoutMs);
     }
 
+    /**
+     * 当前生效配置的只读快照（全字段非 null），供通知 diff、监控等场景使用。
+     */
+    public BatchWorkerConfigPOJO configSnapshot() {
+        BatchWorkerConfigPOJO snapshot = new BatchWorkerConfigPOJO();
+        snapshot.setQueueCapacity(queueCapacity);
+        snapshot.setBatchSize(batchSize);
+        snapshot.setMaxWaitMs(maxWaitMs);
+        snapshot.setOfferTimeoutMs(offerTimeoutMs);
+        snapshot.setConsumers(consumers);
+        return snapshot;
+    }
+
     /** 启动一条消费线程并登记其停止标志 */
     private void startConsumerThread(int index) {
         AtomicBoolean stopFlag = new AtomicBoolean(false);

@@ -1,4 +1,4 @@
-package com.dynamicbatch.core.notifier;
+package com.dynamicbatch.core.notifier.channel;
 
 import cn.hutool.http.HttpRequest;
 import com.dynamicbatch.common.enums.NotifyPlatformEnum;
@@ -12,7 +12,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -77,15 +77,17 @@ public class DingNotifier extends AbstractNotifier {
         String receivers = platform.getReceivers();
         boolean atAll = isBlank(receivers) || "all".equalsIgnoreCase(receivers.trim());
 
-        Map<String, Object> req = new HashMap<>();
+        // LinkedHashMap 保持插入序，保证任意 JsonParser 序列化输出的键序一致
+        Map<String, Object> req = new LinkedHashMap<>();
         req.put("msgtype", "markdown");
 
-        Map<String, Object> markdown = new HashMap<>();
+        // 钉钉 markdown 协议：title 必须在 markdown 对象内部，放顶层会报 400402 title 缺失
+        Map<String, Object> markdown = new LinkedHashMap<>();
         markdown.put("title", NOTICE_TITLE);
         markdown.put("text", content);
         req.put("markdown", markdown);
 
-        Map<String, Object> at = new HashMap<>();
+        Map<String, Object> at = new LinkedHashMap<>();
         at.put("isAtAll", atAll);
         if (atAll) {
             at.put("atMobiles", new String[0]);

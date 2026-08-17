@@ -1,4 +1,4 @@
-package com.dynamicbatch.core.notifier;
+package com.dynamicbatch.core.notifier.channel;
 
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
 

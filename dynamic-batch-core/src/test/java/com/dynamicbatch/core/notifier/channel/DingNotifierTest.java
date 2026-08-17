@@ -1,6 +1,7 @@
-package com.dynamicbatch.core.notifier;
+package com.dynamicbatch.core.notifier.channel;
 
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
+import com.dynamicbatch.common.util.JsonUtil;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.After;
 import org.junit.Before;
@@ -11,9 +12,11 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class DingNotifierTest {
@@ -92,6 +95,18 @@ public class DingNotifierTest {
         assertTrue(body.contains("\"atMobiles\":[\"13800000000\",\"13900000000\"]"));
         assertTrue(body.contains("\"isAtAll\":false"));
         assertTrue(body.contains("hello \\\"quoted\\\""));
+    }
+
+    @Test
+    public void buildBodyPutsTitleInsideMarkdown() {
+        // 钉钉协议：title 必须在 markdown 对象内部；放顶层会被拒收（errcode 400402 title 缺失）
+        NotifyPlatformPOJO platform = new NotifyPlatformPOJO();
+        String body = notifier.buildBody(platform, "msg");
+        Map<?, ?> req = JsonUtil.fromJson(body, Map.class);
+        Map<?, ?> markdown = (Map<?, ?>) req.get("markdown");
+        assertEquals("攒批通知", markdown.get("title"));
+        assertEquals("msg", markdown.get("text"));
+        assertNull(req.get("title"));
     }
 
     @Test

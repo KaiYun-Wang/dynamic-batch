@@ -1,7 +1,7 @@
 package com.dynamicbatch.spring.notify;
 
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
-import com.dynamicbatch.core.notifier.NotifierRegistry;
+import com.dynamicbatch.core.notifier.channel.NotifierRegistry;
 import com.dynamicbatch.spring.properties.NotifyProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

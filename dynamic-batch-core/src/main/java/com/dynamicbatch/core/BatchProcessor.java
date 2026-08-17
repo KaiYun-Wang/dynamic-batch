@@ -1,6 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,7 +65,10 @@ public class BatchProcessor {
             log.error("worker not found: key={}", key);
             return false;
         }
+        // 先拍生效中配置快照，再更新；通知由 NotifyManager 异步处理，这里只投递数据
+        BatchWorkerConfigPOJO oldConfig = worker.configSnapshot();
         worker.refresh(config);
+        NotifyManager.getInstance().tryNoticeChangeAsync(key, oldConfig, config);
         return true;
     }
 
