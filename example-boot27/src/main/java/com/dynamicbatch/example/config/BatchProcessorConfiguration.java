@@ -18,7 +18,8 @@ public class BatchProcessorConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(BatchProcessorConfiguration.class);
 
-    public static final String DEMO_INSERT = "DemoItem:insert";
+    public static final String DEMO_INSERT = "demo_item_insert";
+    public static final String DEMO_UPDATE = "demo_item_update";
 
     private final BatchProcessor batchProcessor;
 
@@ -29,15 +30,25 @@ public class BatchProcessorConfiguration {
     @PostConstruct
     public void registerWriters() {
         batchProcessor.register(DEMO_INSERT,
-                BatchWorker.builder(DemoItem.class, batch -> log.info("demo flush ok, size={}, first={}", batch.size(), batch.get(0)))
+                BatchWorker.builder(DemoItem.class, batch -> log.info("demo insert flush ok, size={}, first={}", batch.size(), batch.get(0)))
                         .queueCapacity(100)
                         .batchSize(5)
                         .maxWaitMs(2000)
                         .offerTimeoutMs(100)
-                        .failureHandler(failed -> log.error("demo flush failed, size={}", failed.size()))
+                        .failureHandler(failed -> log.error("demo insert flush failed, size={}", failed.size()))
                         .build()
         );
-        log.info("批处理器注册完成: {}", DEMO_INSERT);
+        batchProcessor.register(DEMO_UPDATE,
+                BatchWorker.builder(DemoItem.class, batch -> log.info("demo update flush ok, size={}, first={}", batch.size(), batch.get(0)))
+                        .queueCapacity(256)
+                        .batchSize(20)
+                        .maxWaitMs(500)
+                        .offerTimeoutMs(50)
+                        .consumers(2)
+                        .failureHandler(failed -> log.error("demo update flush failed, size={}", failed.size()))
+                        .build()
+        );
+        log.info("批处理器注册完成: {}, {}", DEMO_INSERT, DEMO_UPDATE);
     }
 
     /** 示例数据类型 */

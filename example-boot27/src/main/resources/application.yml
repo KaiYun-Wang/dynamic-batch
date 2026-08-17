@@ -2,6 +2,12 @@ logging:
   level:
     com.dynamicbatch: INFO
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: dynamicbatch
+
 # ========== 通知配置（自测用）==========
 # 填好下方机器人配置后启动：
 #   POST /notify/ding?content=xxx

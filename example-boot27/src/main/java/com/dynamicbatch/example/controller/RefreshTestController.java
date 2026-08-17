@@ -15,10 +15,10 @@ import org.springframework.web.bind.annotation.RestController;
  * 注意 PowerShell 不支持 \ 续行）：
  * <pre>
  * # 只改队列容量 100 -&gt; 200
- * curl.exe -X POST "http://localhost:8080/worker/refresh?key=DemoItem:insert" -H "Content-Type: application/json" -d '{"queueCapacity": 200}'
+ * curl.exe -X POST "http://localhost:8080/worker/refresh?key=demo_item_insert" -H "Content-Type: application/json" -d '{"queueCapacity": 200}'
  *
  * # 同时改攒批条数与最大等待毫秒
- * curl.exe -X POST "http://localhost:8080/worker/refresh?key=DemoItem:insert" -H "Content-Type: application/json" -d '{"batchSize": 10, "maxWaitMs": 1000}'
+ * curl.exe -X POST "http://localhost:8080/worker/refresh?key=demo_item_insert" -H "Content-Type: application/json" -d '{"batchSize": 10, "maxWaitMs": 1000}'
  * </pre>
  * JSON 中未传的字段为 null（不更新）；若所有字段与生效值相同则 diff 为空，不会发通知。
  * 发送结果见机器人消息与应用日志。
@@ -34,7 +34,7 @@ public class RefreshTestController {
     }
 
     @PostMapping("/refresh")
-    public String refresh(@RequestParam(defaultValue = "DemoItem:insert") String key,
+    public String refresh(@RequestParam(defaultValue = "demo_item_insert") String key,
                           @RequestBody BatchWorkerConfigPOJO config) {
         boolean ok = batchProcessor.refresh(key, config);
         return ok ? "refresh 已提交，变更通知异步发送（结果见机器人/日志）"

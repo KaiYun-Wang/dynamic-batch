@@ -112,6 +112,22 @@ public class BatchWorker<T> {
         return snapshot;
     }
 
+    public boolean isRunning() {
+        return running;
+    }
+
+    public int getQueueSize() {
+        return queue.size();
+    }
+
+    public String getDataTypeName() {
+        return type.getName();
+    }
+
+    public int getActiveConsumerCount() {
+        return consumerThreads.size();
+    }
+
     /** 启动一条消费线程并登记其停止标志 */
     private void startConsumerThread(int index) {
         AtomicBoolean stopFlag = new AtomicBoolean(false);

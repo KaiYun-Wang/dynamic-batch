@@ -22,6 +22,7 @@ import java.util.function.Consumer;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class BatchProcessorTest {
 
@@ -352,6 +353,29 @@ public class BatchProcessorTest {
         config.setBatchSize(999);
         config.setQueueCapacity(100);
         processor.refresh("bad", config);
+    }
+
+    @Test
+    public void registerShouldRejectInvalidWorkerKey() {
+        processor = new BatchProcessor();
+        BatchWorker<String> worker = BatchWorker.builder(String.class, batch -> {
+        }).build();
+
+        try {
+            processor.register("DemoItem:insert", worker);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException ex) {
+            assertTrue(ex.getMessage().contains("invalid worker key"));
+        }
+
+        try {
+            processor.register("", worker);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException ex) {
+            assertTrue(ex.getMessage().contains("must not be blank"));
+        }
+
+        processor.register("demo_item-insert_1", worker);
     }
 
     private static void waitUntil(BooleanSupplier condition, long timeoutMs) throws InterruptedException {

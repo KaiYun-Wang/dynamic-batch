@@ -1,11 +1,17 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.common.vo.BatchWorkerInfoVO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -17,15 +23,20 @@ public class BatchProcessor {
 
     private static final Logger log = LoggerFactory.getLogger(BatchProcessor.class);
 
+    /** Worker key 仅允许字母、数字、连字符、下划线。 */
+    private static final String WORKER_KEY_PATTERN = "^[a-zA-Z0-9_-]+$";
+
     private final Map<String, BatchWorker<?>> workerMap = new ConcurrentHashMap<>();
 
     /**
      * 注册 Worker。
      *
-     * @param key    唯一标识，建议「类名:业务名」，如 DeviceDTO:insert
+     * @param key    唯一标识，仅允许字母、数字、{@code -}、{@code _}，如 {@code device_dto_insert}
      * @param worker 已构造好的 Worker（含队列参数与回调）
+     * @throws IllegalArgumentException key 为空或不符合命名规则
      */
     public <T> void register(String key, BatchWorker<T> worker) {
+        validateWorkerKey(key);
         worker.setName(key);
         BatchWorker<?> previous = workerMap.put(key, worker);
         if (previous != null) {
@@ -70,6 +81,58 @@ public class BatchProcessor {
         worker.refresh(config);
         NotifyManager.getInstance().tryNoticeChangeAsync(key, oldConfig, config);
         return true;
+    }
+
+    /** 已注册 Worker 的 key 集合（只读视图）。 */
+    public Set<String> listWorkerKeys() {
+        return Collections.unmodifiableSet(new TreeSet<>(workerMap.keySet()));
+    }
+
+    /**
+     * 查询指定 Worker 的运行时信息。
+     *
+     * @return 不存在时返回 {@code null}
+     */
+    public BatchWorkerInfoVO getWorkerInfo(String key) {
+        BatchWorker<?> worker = workerMap.get(key);
+        if (worker == null) {
+            return null;
+        }
+        BatchWorkerInfoVO info = new BatchWorkerInfoVO();
+        info.setKey(key);
+        info.setDataType(worker.getDataTypeName());
+        info.setRunning(worker.isRunning());
+        info.setQueueSize(worker.getQueueSize());
+        info.setActiveConsumers(worker.getActiveConsumerCount());
+        info.setConfig(worker.configSnapshot());
+        return info;
+    }
+
+    /** 查询所有 Worker 的运行时信息。 */
+    public List<BatchWorkerInfoVO> listWorkerInfos() {
+        List<BatchWorkerInfoVO> infos = new ArrayList<>(workerMap.size());
+        for (String key : listWorkerKeys()) {
+            BatchWorkerInfoVO info = getWorkerInfo(key);
+            if (info != null) {
+                infos.add(info);
+            }
+        }
+        return infos;
+    }
+
+    /**
+     * 校验 Worker key 命名：非空，且仅含字母、数字、{@code -}、{@code _}。
+     *
+     * @throws IllegalArgumentException 不符合规则时
+     */
+    public static void validateWorkerKey(String key) {
+        if (key == null || key.isEmpty()) {
+            throw new IllegalArgumentException("worker key must not be blank");
+        }
+        if (!key.matches(WORKER_KEY_PATTERN)) {
+            throw new IllegalArgumentException(
+                    "invalid worker key: " + key + ", only letters, digits, '-' and '_' are allowed");
+        }
     }
 
     /** 关闭所有 Worker，并尽量刷掉剩余数据 */

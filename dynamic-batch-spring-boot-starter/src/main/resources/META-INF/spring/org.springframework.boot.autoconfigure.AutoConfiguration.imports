@@ -1,2 +1,3 @@
 com.dynamicbatch.spring.autoconfigure.BatchProcessorAutoConfiguration
 com.dynamicbatch.spring.autoconfigure.NotifyAutoConfiguration
+com.dynamicbatch.spring.autoconfigure.BatchActuatorAutoConfiguration
