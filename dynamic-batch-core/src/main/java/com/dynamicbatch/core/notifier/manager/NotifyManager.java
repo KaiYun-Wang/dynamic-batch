@@ -67,6 +67,7 @@ public class NotifyManager {
      */
     public void init(List<NotifyPlatformPOJO> platforms) {
         this.platforms = platforms == null ? Collections.emptyList() : platforms;
+        NotifierRegistry.getInstance(); // 触发 SPI 加载
         log.info("notify manager initialized, platforms={}", this.platforms);
     }
 

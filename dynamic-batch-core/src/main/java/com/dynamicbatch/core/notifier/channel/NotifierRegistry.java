@@ -1,9 +1,11 @@
 package com.dynamicbatch.core.notifier.channel;
 
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
+import com.dynamicbatch.common.util.ExtensionServiceLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -11,8 +13,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * 通知渠道注册表。
  *
  * <p>单例；按平台名维护渠道实例，发送时根据 {@link NotifyPlatformPOJO#getPlatform()}
- * 找到对应渠道并委托。构造时注册内置渠道（钉钉、企业微信），外部渠道通过
- * {@link #register} 追加，无需改动本类。
+ * 找到对应渠道并委托。构造时注册内置渠道（钉钉、企业微信），邮箱等通过 SPI
+ * 加载并由 {@link Notifier#supports()} 过滤不可用的实现。
  * 设计参考 dromara dynamic-tp 的 core/handler/NotifierHandler。
  */
 public class NotifierRegistry {
@@ -24,6 +26,25 @@ public class NotifierRegistry {
     private NotifierRegistry() {
         register(new DingNotifier());
         register(new WechatNotifier());
+        loadSpiNotifiers();
+    }
+
+    /**
+     * 通过 SPI 加载外部渠道（如邮箱），按 supports() 过滤。
+     */
+    private void loadSpiNotifiers() {
+        List<Notifier> loaded = ExtensionServiceLoader.get(Notifier.class);
+        if (loaded == null) {
+            return;
+        }
+        for (Notifier n : loaded) {
+            if (n.supports()) {
+                register(n);
+                log.info("SPI notifier registered: {}", n.getClass().getSimpleName());
+            } else {
+                log.info("SPI notifier skipped (supports()=false): {}", n.getClass().getSimpleName());
+            }
+        }
     }
 
     public static NotifierRegistry getInstance() {

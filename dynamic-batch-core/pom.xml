@@ -19,6 +19,11 @@
             <artifactId>hutool-http</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
             <groupId>com.dynamicbatch</groupId>
             <artifactId>dynamic-batch-common</artifactId>
         </dependency>
