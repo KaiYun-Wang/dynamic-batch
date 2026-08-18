@@ -1,5 +1,6 @@
 package com.dynamicbatch.spring.actuator;
 
+import com.dynamicbatch.common.enums.BatchWorkerHotUpdateType;
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
 import com.dynamicbatch.common.vo.BatchWorkerInfoVO;
 import com.dynamicbatch.core.BatchProcessor;
@@ -103,17 +104,27 @@ public class BatchEndpoint {
         refreshConfig.setMaxWaitMs(maxWaitMs);
         refreshConfig.setOfferTimeoutMs(offerTimeoutMs);
         refreshConfig.setConsumers(consumers);
-        boolean ok = batchProcessor.refresh(key, refreshConfig);
+        // 显式声明 endpoint 通道：worker 构建时未声明 BatchWorkerHotUpdateType.ENDPOINT 则拒绝，防止通道混用
         Map<String, Object> result = new LinkedHashMap<>(4);
         result.put("key", key);
-        result.put("success", ok);
-        result.put("message", ok ? "refresh submitted, change notification sent asynchronously"
-                : "refresh failed: worker not found");
-        if (ok) {
-            BatchWorkerInfoVO info = batchProcessor.getWorkerInfo(key);
-            if (info != null) {
-                result.put("config", info.getConfig());
+        try {
+            boolean ok = batchProcessor.refresh(key, refreshConfig, BatchWorkerHotUpdateType.ENDPOINT);
+            if (ok) {
+                result.put("success", true);
+                result.put("message", "refresh submitted, change notification sent asynchronously");
+                BatchWorkerInfoVO info = batchProcessor.getWorkerInfo(key);
+                if (info != null) {
+                    result.put("config", info.getConfig());
+                }
+            } else {
+                // refresh 返回 false 仅表示 worker 不存在（其余失败由异常表达）
+                result.put("success", false);
+                result.put("message", "refresh failed: worker not found");
             }
+        } catch (IllegalArgumentException ex) {
+            // 通道类型不匹配或参数非法：由 worker 层校验抛出，透传可读信息
+            result.put("success", false);
+            result.put("message", "refresh failed: " + ex.getMessage());
         }
         return result;
     }

@@ -1,5 +1,6 @@
 package com.dynamicbatch.common.vo;
 
+import com.dynamicbatch.common.enums.BatchWorkerHotUpdateType;
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
 
 /**
@@ -9,6 +10,8 @@ public class BatchWorkerInfoVO {
 
     private String key;
     private String dataType;
+    /** 热更新通道类型，运行期只读，构建时锁定；null 表示不支持热更新 */
+    private BatchWorkerHotUpdateType hotUpdateType;
     private boolean running;
     private int queueSize;
     private int activeConsumers;
@@ -28,6 +31,14 @@ public class BatchWorkerInfoVO {
 
     public void setDataType(String dataType) {
         this.dataType = dataType;
+    }
+
+    public BatchWorkerHotUpdateType getHotUpdateType() {
+        return hotUpdateType;
+    }
+
+    public void setHotUpdateType(BatchWorkerHotUpdateType hotUpdateType) {
+        this.hotUpdateType = hotUpdateType;
     }
 
     public boolean isRunning() {

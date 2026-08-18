@@ -4,6 +4,7 @@ import org.junit.After;
 import org.junit.Test;
 
 import com.dynamicbatch.core.BatchWorker;
+import com.dynamicbatch.common.enums.BatchWorkerHotUpdateType;
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
 
 import java.util.ArrayList;
@@ -21,6 +22,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -144,6 +146,7 @@ public class BatchProcessorTest {
         List<List<Integer>> batches = new CopyOnWriteArrayList<>();
         processor.register("bs",
                 BatchWorker.builder(Integer.class, batch -> batches.add(new ArrayList<>(batch)))
+                        .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
                         .queueCapacity(100)
                         .batchSize(2)
                         .maxWaitMs(2000)
@@ -159,7 +162,7 @@ public class BatchProcessorTest {
         // 热更新 batchSize=1：无需重启，下一批即按新值攒批
         BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
         config.setBatchSize(1);
-        assertTrue(processor.refresh("bs", config));
+        assertTrue(processor.refresh("bs", config, BatchWorkerHotUpdateType.ENDPOINT));
 
         assertTrue(processor.submit("bs", 3));
         waitUntil(() -> batches.size() >= 2, 3000);
@@ -172,6 +175,7 @@ public class BatchProcessorTest {
         CountDownLatch latch = new CountDownLatch(1);
         processor.register("mw",
                 BatchWorker.builder(Integer.class, batch -> latch.countDown())
+                        .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
                         .queueCapacity(100)
                         .batchSize(100)
                         .maxWaitMs(5000)
@@ -183,7 +187,7 @@ public class BatchProcessorTest {
         assertTrue(processor.submit("mw", 1));
         BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
         config.setMaxWaitMs(200L);
-        assertTrue(processor.refresh("mw", config));
+        assertTrue(processor.refresh("mw", config, BatchWorkerHotUpdateType.ENDPOINT));
 
         assertTrue("flush should happen with refreshed maxWaitMs", latch.await(2, TimeUnit.SECONDS));
     }
@@ -201,6 +205,7 @@ public class BatchProcessorTest {
         };
         processor.register("ot",
                 BatchWorker.builder(Integer.class, slowHandler)
+                        .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
                         .queueCapacity(2)
                         .batchSize(2)
                         .maxWaitMs(1000)
@@ -215,7 +220,7 @@ public class BatchProcessorTest {
         // 热更新 offerTimeoutMs 100 -> 3000：下一次遇到满队列的 submit 将按新值阻塞
         BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
         config.setOfferTimeoutMs(3000L);
-        assertTrue(processor.refresh("ot", config));
+        assertTrue(processor.refresh("ot", config, BatchWorkerHotUpdateType.ENDPOINT));
 
         // 队列仍满：本次 submit 阻塞直到消费线程 flush 完成腾出空位（约 1~2s），远大于旧值 100ms
         long start = System.currentTimeMillis();
@@ -238,6 +243,7 @@ public class BatchProcessorTest {
         };
         processor.register("cap",
                 BatchWorker.builder(Integer.class, slowHandler)
+                        .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
                         .queueCapacity(10)
                         .batchSize(10)
                         .maxWaitMs(1000)
@@ -256,7 +262,7 @@ public class BatchProcessorTest {
         // 热更新容量 10 -> 60：本轮 20 条全部入队
         BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
         config.setQueueCapacity(60);
-        assertTrue(processor.refresh("cap", config));
+        assertTrue(processor.refresh("cap", config, BatchWorkerHotUpdateType.ENDPOINT));
         int secondSuccess = 0;
         for (int i = 0; i < 20; i++) {
             if (processor.submit("cap", i)) {
@@ -268,7 +274,7 @@ public class BatchProcessorTest {
         // 热更新容量 60 -> 5（同时 batchSize=5 满足 batchSize <= queueCapacity 校验）：重新受容量限制
         config.setQueueCapacity(5);
         config.setBatchSize(5);
-        assertTrue(processor.refresh("cap", config));
+        assertTrue(processor.refresh("cap", config, BatchWorkerHotUpdateType.ENDPOINT));
         int thirdSuccess = 0;
         for (int i = 0; i < 20; i++) {
             if (processor.submit("cap", i)) {
@@ -280,7 +286,7 @@ public class BatchProcessorTest {
         // 调大 batchSize 加快 tearDown 的剩余数据刷盘（残留 < 60 时 1 批即可），避免多批 × 500ms
         config.setQueueCapacity(60);
         config.setBatchSize(60);
-        processor.refresh("cap", config);
+        processor.refresh("cap", config, BatchWorkerHotUpdateType.ENDPOINT);
     }
 
     @Test
@@ -298,6 +304,7 @@ public class BatchProcessorTest {
 
         processor.register("con",
                 BatchWorker.builder(Integer.class, handler)
+                        .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
                         .queueCapacity(2000)
                         .batchSize(1000)
                         .maxWaitMs(50)
@@ -315,7 +322,7 @@ public class BatchProcessorTest {
         // 热更新 consumers 1 -> 2：新增线程参与消费
         BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
         config.setConsumers(2);
-        assertTrue(processor.refresh("con", config));
+        assertTrue(processor.refresh("con", config, BatchWorkerHotUpdateType.ENDPOINT));
         for (int i = 0; i < 100; i++) {
             processor.submit("con", i);
         }
@@ -324,7 +331,7 @@ public class BatchProcessorTest {
 
         // 热更新 consumers 2 -> 1：refresh 同步等待多余线程退出后，新 flush 只来自 1 个线程
         config.setConsumers(1);
-        assertTrue(processor.refresh("con", config));
+        assertTrue(processor.refresh("con", config, BatchWorkerHotUpdateType.ENDPOINT));
         Map<String, Integer> base = snapshot(flushCounts);
         for (int i = 0; i < 200; i++) {
             processor.submit("con", i);
@@ -345,6 +352,7 @@ public class BatchProcessorTest {
         processor.register("bad",
                 BatchWorker.builder(Integer.class, batch -> {
                 })
+                        .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
                         .queueCapacity(100)
                         .build());
 
@@ -352,7 +360,7 @@ public class BatchProcessorTest {
         BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
         config.setBatchSize(999);
         config.setQueueCapacity(100);
-        processor.refresh("bad", config);
+        processor.refresh("bad", config, BatchWorkerHotUpdateType.ENDPOINT);
     }
 
     @Test
@@ -376,6 +384,79 @@ public class BatchProcessorTest {
         }
 
         processor.register("demo_item-insert_1", worker);
+    }
+
+    @Test
+    public void hotUpdateTypeShouldDefaultToUnsupported() {
+        processor = new BatchProcessor();
+        processor.register("none", BatchWorker.builder(Integer.class, batch -> {
+        }).build());
+
+        // 默认不支持热更新：Builder 未声明通道（hotUpdateType 为 null），外部通道一律拒绝
+        assertNull(processor.getWorkerInfo("none").getHotUpdateType());
+    }
+
+    @Test
+    public void refreshWithTypeShouldRejectMismatch() {
+        processor = new BatchProcessor();
+        processor.register("none", BatchWorker.builder(Integer.class, batch -> {
+        })
+                .queueCapacity(100)
+                .batchSize(10)
+                .build());
+
+        // 未声明通道（null，不支持热更新）的 worker：endpoint 通道刷新被拒（防混用），参数保持不变；校验由 worker 层抛异常
+        BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
+        config.setBatchSize(20);
+        try {
+            processor.refresh("none", config, BatchWorkerHotUpdateType.ENDPOINT);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException ex) {
+            assertTrue(ex.getMessage().contains("hotUpdateType mismatch"));
+        }
+        assertEquals(Integer.valueOf(10), processor.getWorkerInfo("none").getConfig().getBatchSize());
+    }
+
+    @Test
+    public void workerRefreshShouldRejectMismatchTypeDirectly() {
+        // 直接持有 worker 引用调 refresh（绕过 BatchProcessor）：worker 层同样校验通道，无旁路
+        BatchWorker<Integer> worker = BatchWorker.builder(Integer.class, batch -> {
+        })
+                .queueCapacity(100)
+                .batchSize(10)
+                .build();
+
+        try {
+            worker.refresh(new BatchWorkerConfigPOJO(), BatchWorkerHotUpdateType.ENDPOINT);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException ex) {
+            assertTrue(ex.getMessage().contains("hotUpdateType mismatch"));
+        }
+        assertEquals(Integer.valueOf(10), worker.configSnapshot().getBatchSize());
+    }
+
+    @Test
+    public void refreshShouldReturnFalseForUnknownKey() {
+        processor = new BatchProcessor();
+
+        // refresh 返回 false 仅表示 worker 不存在；类型/参数校验失败均以异常表达
+        assertTrue(!processor.refresh("unknown", new BatchWorkerConfigPOJO(), BatchWorkerHotUpdateType.ENDPOINT));
+    }
+
+    @Test
+    public void refreshWithTypeShouldAllowMatchingType() {
+        processor = new BatchProcessor();
+        processor.register("ep", BatchWorker.builder(Integer.class, batch -> {
+        })
+                .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
+                .queueCapacity(100)
+                .batchSize(10)
+                .build());
+
+        BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
+        config.setBatchSize(20);
+        assertTrue(processor.refresh("ep", config, BatchWorkerHotUpdateType.ENDPOINT));
+        assertEquals(Integer.valueOf(20), processor.getWorkerInfo("ep").getConfig().getBatchSize());
     }
 
     private static void waitUntil(BooleanSupplier condition, long timeoutMs) throws InterruptedException {

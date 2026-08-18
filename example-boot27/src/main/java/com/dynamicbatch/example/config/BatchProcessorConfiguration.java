@@ -1,5 +1,6 @@
 package com.dynamicbatch.example.config;
 
+import com.dynamicbatch.common.enums.BatchWorkerHotUpdateType;
 import com.dynamicbatch.core.BatchProcessor;
 import com.dynamicbatch.core.BatchWorker;
 import org.slf4j.Logger;
@@ -31,6 +32,7 @@ public class BatchProcessorConfiguration {
     public void registerWriters() {
         batchProcessor.register(DEMO_INSERT,
                 BatchWorker.builder(DemoItem.class, batch -> log.info("demo insert flush ok, size={}, first={}", batch.size(), batch.get(0)))
+                        .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
                         .queueCapacity(100)
                         .batchSize(5)
                         .maxWaitMs(2000)

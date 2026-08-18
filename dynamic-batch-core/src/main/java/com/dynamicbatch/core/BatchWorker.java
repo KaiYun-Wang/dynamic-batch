@@ -1,6 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
+import com.dynamicbatch.common.enums.BatchWorkerHotUpdateType;
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
 import com.dynamicbatch.common.queue.VariableLinkedBlockingQueue;
 import org.slf4j.Logger;
@@ -33,6 +34,8 @@ public class BatchWorker<T> {
     private volatile long offerTimeoutMs;
     private final Consumer<List<T>> flushCallback;
     private final Consumer<List<T>> failureHandler;
+    /** 热更新通道类型，构建期锁定：null 表示不支持热更新（外部通道刷新前须与自身类型匹配） */
+    private final BatchWorkerHotUpdateType hotUpdateType;
     /** 期望消费线程数：多条线程从同一队列竞争取数据、各自攒批各自 flush（分片并行，不保证顺序） */
     private volatile int consumers;
 
@@ -50,6 +53,7 @@ public class BatchWorker<T> {
         this.offerTimeoutMs = builder.offerTimeoutMs;
         this.flushCallback = builder.flushCallback;
         this.failureHandler = builder.failureHandler;
+        this.hotUpdateType = builder.hotUpdateType;
         this.queue = new VariableLinkedBlockingQueue<>(queueCapacity);
     }
 
@@ -59,6 +63,13 @@ public class BatchWorker<T> {
 
     public String getName() {
         return name;
+    }
+
+    /**
+     * 热更新通道类型；{@code null} 表示不支持热更新。
+     */
+    public BatchWorkerHotUpdateType getHotUpdateType() {
+        return hotUpdateType;
     }
 
     public synchronized void start() {
@@ -76,8 +87,22 @@ public class BatchWorker<T> {
      * {@link VariableLinkedBlockingQueue#setCapacity(int)} 动态调整；consumers 增则新建消费线程，
      * 减则等待多余线程自然退出（复用优雅关闭模式）。校验规则与 {@link Builder#build()} 一致，
      * 失败抛 {@link IllegalArgumentException}。
+     *
+     * <p>必须显式声明热更新通道：{@code type} 须与本 Worker 构建时声明的
+     * {@link #getHotUpdateType()} 相同，否则抛 {@link IllegalArgumentException}；
+     * 本 Worker 未声明通道（getHotUpdateType() 为 null，即不支持热更新）时任何 type 都会被拒绝。
+     * 本方法为底层入口（由 {@link BatchProcessor} 调用），直接持有引用调用同样受通道校验约束，
+     * 不存在绕过通道声明的刷新路径。
+     *
+     * @param config 待更新配置，{@code null} 字段不更新
+     * @param type   热更新通道，必填，须与 Worker 声明类型一致
      */
-    public synchronized void refresh(BatchWorkerConfigPOJO config) {
+    public synchronized void refresh(BatchWorkerConfigPOJO config, BatchWorkerHotUpdateType type) {
+        Objects.requireNonNull(type, "type must not be null");
+        if (this.hotUpdateType != type) {
+            throw new IllegalArgumentException("refresh rejected, hotUpdateType mismatch: expected="
+                    + this.hotUpdateType + ", actual=" + type);
+        }
         int newQueueCapacity = config.getQueueCapacity() != null ? config.getQueueCapacity() : this.queueCapacity;
         int newBatchSize = config.getBatchSize() != null ? config.getBatchSize() : this.batchSize;
         long newMaxWaitMs = config.getMaxWaitMs() != null ? config.getMaxWaitMs() : this.maxWaitMs;
@@ -329,7 +354,7 @@ public class BatchWorker<T> {
     // ======================== 参数校验 ========================
 
     /**
-     * 参数合法性校验，{@link Builder#build()} 与 {@link #refresh(BatchWorkerConfigPOJO)} 共用：
+     * 参数合法性校验，{@link Builder#build()} 与 {@link #refresh(BatchWorkerConfigPOJO, BatchWorkerHotUpdateType)} 共用：
      * 非法参数抛 {@link IllegalArgumentException}。
      */
     private static void validateParams(int queueCapacity, int batchSize, long maxWaitMs, long offerTimeoutMs, int consumers) {
@@ -397,6 +422,8 @@ public class BatchWorker<T> {
         private Consumer<List<T>> failureHandler;
         /** 消费线程数：多条线程从同一队列竞争取数据、各自攒批各自 flush（分片并行，不保证顺序） */
         private int consumers = BatchWorkerConstant.DEFAULT_CONSUMERS;
+        /** 热更新通道类型，默认 null（不支持热更新）；需外部通道热更时显式声明 */
+        private BatchWorkerHotUpdateType hotUpdateType;
 
         private Builder(Class<T> type, Consumer<List<T>> flushCallback) {
             this.type = Objects.requireNonNull(type, "type must not be null");
@@ -430,6 +457,11 @@ public class BatchWorker<T> {
 
         public Builder<T> consumers(int consumers) {
             this.consumers = consumers;
+            return this;
+        }
+
+        public Builder<T> hotUpdateType(BatchWorkerHotUpdateType hotUpdateType) {
+            this.hotUpdateType = Objects.requireNonNull(hotUpdateType, "hotUpdateType must not be null");
             return this;
         }
 
