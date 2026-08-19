@@ -13,35 +13,40 @@ management:
 #   POST /notify/ding?content=xxx
 #   POST /notify/wechat?content=xxx
 #   POST /notify/email?content=xxx（需引入 spring-boot-starter-mail）
+#
+# 通知类型（无需额外配置，触发即发）：
+#   change        配置变更通知（BatchProcessor.refresh 后）
+#   offer_failed  入队失败告警（submit 被拒绝：已关闭/类型不匹配/队列满超时/中断）
+#   flush_failed  批次执行失败告警（flush 回调抛异常）
 dynamic-batch:
   notify:
     platforms:
-#     - platform: ding
-#       # TODO 钉钉机器人 webhook，形如：
-#       # https://oapi.dingtalk.com/robot/send?access_token=你的token
-#       webhook: ""
-#       # TODO 机器人安全设置选“加签”时的密钥；非加签模式留空
-#       secret: ""
-#       # webhook 未携带 access_token 时，也可在此填 token（与 webhook 二选一）
-#       # urlKey: ""
-#       # @ 的手机号，逗号分隔；"all" 或留空 = @所有人
-#       receivers: "all"
-#       # HTTP 超时毫秒
-#       timeout: 3000
-#     - platform: wechat
-#       # TODO 企业微信群机器人 webhook，形如：
-#       # https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key
-#       webhook: ""
-#       # webhook 未携带 key 时，也可在此填 key（与 webhook 二选一）
-#       # urlKey: ""
-#       timeout: 3000
-#     - platform: email
-#       # TODO SMTP 配置（需引入 spring-boot-starter-mail）
-#       host: "smtp.qq.com"       # SMTP 服务器地址，如 smtp.qq.com
-#       port: 465      # SMTP 端口
-#       username: ""   # 发件人邮箱（SMTP 登录账号）
-#       password: ""   # SMTP 授权码
-#       title: dynamic-batch # 邮件标题，可选，默认"攒批通知"
-#       receivers: ""  # 收件人地址，逗号分隔
-#       timeout: 3000
+      - platform: ding
+        # TODO 钉钉机器人 webhook，形如：
+        # https://oapi.dingtalk.com/robot/send?access_token=你的token
+        webhook: ""
+        # TODO 机器人安全设置选“加签”时的密钥；非加签模式留空
+        secret: ""
+        # webhook 未携带 access_token 时，也可在此填 token（与 webhook 二选一）
+        # urlKey: ""
+        # @ 的手机号，逗号分隔；"all" 或留空 = @所有人
+        receivers: "all"
+        # HTTP 超时毫秒
+        timeout: 3000
+      - platform: wechat
+        # TODO 企业微信群机器人 webhook，形如：
+        # https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key
+        webhook: ""
+        # webhook 未携带 key 时，也可在此填 key（与 webhook 二选一）
+        # urlKey: ""
+        timeout: 3000
+      - platform: email
+        # TODO SMTP 配置（需引入 spring-boot-starter-mail）
+        host: "smtp.qq.com"       # SMTP 服务器地址，如 smtp.qq.com
+        port: 465      # SMTP 端口
+        username: ""   # 发件人邮箱（SMTP 登录账号）
+        password: ""   # SMTP 授权码
+        title: dynamic-batch # 邮件标题，可选，默认"攒批通知"
+        receivers: ""  # 收件人地址，逗号分隔
+        timeout: 3000
 

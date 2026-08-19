@@ -4,6 +4,7 @@ import com.dynamicbatch.common.constants.BatchWorkerConstant;
 import com.dynamicbatch.common.enums.BatchWorkerHotUpdateType;
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
 import com.dynamicbatch.common.queue.VariableLinkedBlockingQueue;
+import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
@@ -199,6 +200,7 @@ public class BatchWorker<T> {
         // 已关闭则直接拒绝：避免「返回 true 但数据入队后无人消费」的静默丢失
         if (!running) {
             log.warn("[{}] submit rejected, worker not running", name);
+            NotifyManager.getInstance().tryNoticeOfferFailedAsync(name, "worker 已关闭", offerTimeoutMs, queue.size());
             return false;
         }
         // 类型校验（fail fast）：错误类型的数据在业务线程就拒绝，
@@ -207,17 +209,22 @@ public class BatchWorker<T> {
         if (!type.isInstance(data)) {
             log.error("[{}] submit rejected, type mismatch: expected={}, got={}",
                     name, type.getName(), data == null ? "null" : data.getClass().getName());
+            NotifyManager.getInstance().tryNoticeOfferFailedAsync(name,
+                    "类型不匹配: expected=" + type.getName() + ", got=" + (data == null ? "null" : data.getClass().getName()),
+                    offerTimeoutMs, queue.size());
             return false;
         }
         try {
             boolean ok = queue.offer(data, offerTimeoutMs, TimeUnit.MILLISECONDS);
             if (!ok) {
                 log.warn("[{}] queue full, offer timed out after {}ms", name, offerTimeoutMs);
+                NotifyManager.getInstance().tryNoticeOfferFailedAsync(name, "队列已满，offer 超时", offerTimeoutMs, queue.size());
             }
             return ok;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();   // 关键：恢复中断标志
             log.warn("[{}] submit interrupted", name);
+            NotifyManager.getInstance().tryNoticeOfferFailedAsync(name, "submit 被中断", offerTimeoutMs, queue.size());
             return false;
         }
     }
@@ -278,16 +285,21 @@ public class BatchWorker<T> {
             }
         } catch (Exception e) {
             log.error("[{}] flush failed, size={}, err={}", name, batch.size(), e.toString(), e);
+            boolean dataLossRisk = false;
             if (failureHandler != null) {
                 try {
                     failureHandler.accept(batch);
                     log.warn("[{}] failureHandler handled {} items", name, batch.size());
                 } catch (Exception ex) {
                     log.error("[{}] failureHandler also failed, size={}", name, batch.size(), ex);
+                    dataLossRisk = true;
                 }
             } else {
                 log.error("[{}] no failureHandler, {} items may be lost", name, batch.size());
+                dataLossRisk = true;
             }
+            // 通知放在 failureHandler 处理完之后，消息才能带上数据丢失风险
+            NotifyManager.getInstance().tryNoticeFlushFailedAsync(name, batch.size(), e.toString(), dataLossRisk);
         }
     }
 

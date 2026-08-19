@@ -10,5 +10,11 @@ package com.dynamicbatch.common.enums;
 public enum NotifyTypeEnum {
 
     /** 配置变更通知：worker 热更新后，汇总实际变更的字段与新旧值 */
-    CHANGE
+    CHANGE,
+
+    /** 入队失败告警：submit 被拒绝（worker 未运行 / 类型不匹配 / 队列满超时 / 被中断） */
+    OFFER_FAILED,
+
+    /** 批次执行失败告警：flush 回调抛异常（含 failureHandler 是否兜住的信息） */
+    FLUSH_FAILED
 }

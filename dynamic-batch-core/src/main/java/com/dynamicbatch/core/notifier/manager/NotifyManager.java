@@ -5,9 +5,13 @@ import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
 import com.dynamicbatch.core.notifier.channel.NotifierRegistry;
 import com.dynamicbatch.core.notifier.context.ChangeContext;
+import com.dynamicbatch.core.notifier.context.FlushFailedContext;
 import com.dynamicbatch.core.notifier.context.NotifyContext;
+import com.dynamicbatch.core.notifier.context.OfferFailedContext;
 import com.dynamicbatch.core.notifier.template.ChangeNoticeTemplate;
+import com.dynamicbatch.core.notifier.template.FlushFailedNoticeTemplate;
 import com.dynamicbatch.core.notifier.template.NoticeTemplate;
+import com.dynamicbatch.core.notifier.template.OfferFailedNoticeTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +58,8 @@ public class NotifyManager {
 
     private NotifyManager() {
         registerTemplate(new ChangeNoticeTemplate());
+        registerTemplate(new OfferFailedNoticeTemplate());
+        registerTemplate(new FlushFailedNoticeTemplate());
     }
 
     public static NotifyManager getInstance() {
@@ -95,6 +101,32 @@ public class NotifyManager {
      */
     public void tryNoticeChangeAsync(String key, BatchWorkerConfigPOJO oldConfig, BatchWorkerConfigPOJO newConfig) {
         NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.CHANGE, new ChangeContext(key, oldConfig, newConfig)));
+    }
+
+    /**
+     * 入队失败告警：worker 提交失败（未运行 / 类型不匹配 / 队列满超时 / 中断）时投递，异步执行立即返回。
+     *
+     * @param key            worker 唯一标识
+     * @param reason         失败原因描述
+     * @param offerTimeoutMs 入队超时毫秒
+     * @param queueSize      失败时刻队列中的元素数量
+     */
+    public void tryNoticeOfferFailedAsync(String key, String reason, long offerTimeoutMs, int queueSize) {
+        NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.OFFER_FAILED,
+                new OfferFailedContext(key, reason, offerTimeoutMs, queueSize)));
+    }
+
+    /**
+     * 批次执行失败告警：flush 回调抛异常（failureHandler 处理完之后）时投递，异步执行立即返回。
+     *
+     * @param key          worker 唯一标识
+     * @param failedSize   本次失败批次的元素数量
+     * @param errorMsg     flush 回调抛出的异常信息
+     * @param dataLossRisk failureHandler 未配置或也未兜住时为 true
+     */
+    public void tryNoticeFlushFailedAsync(String key, int failedSize, String errorMsg, boolean dataLossRisk) {
+        NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.FLUSH_FAILED,
+                new FlushFailedContext(key, failedSize, errorMsg, dataLossRisk)));
     }
 
     @SuppressWarnings("unchecked")

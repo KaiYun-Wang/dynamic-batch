@@ -77,6 +77,7 @@ public class BatchProcessorConfiguration {
                 .offerTimeoutMs(100)
                 .consumers(1)
                 .failureHandler(failed -> log.error("flush failed, size={}", failed.size()))
+                .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)  // 声明热更新通道，见 3.3
                 .build()
         );
     }
@@ -86,6 +87,8 @@ public class BatchProcessorConfiguration {
     }
 }
 ```
+
+**注意：** `flushCallback` 抛异常时自动发批次失败告警（见 §6）；`failureHandler` 可选，未配置时告警消息会标记数据丢失风险。
 
 ### 3.2 提交数据
 
@@ -100,9 +103,15 @@ boolean ok = batchProcessor.submit("device_dto_insert", deviceDTO);
 BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
 config.setBatchSize(100);   // 只 set 要改的字段
 config.setQueueCapacity(200);
-batchProcessor.refresh("device_dto_insert", config);
+batchProcessor.refresh("device_dto_insert", config, BatchWorkerHotUpdateType.ENDPOINT);
 // null 字段 = 不更新
 ```
+
+**通道隔离规则：**
+
+- 热更新必须显式声明通道 `type`，且须与 Worker 构建时声明的 `hotUpdateType` **完全一致**，否则抛 `IllegalArgumentException`；
+- Worker 未声明通道（构建时没调 `.hotUpdateType(...)`）时，**任何通道的刷新都会被拒绝**（即该 Worker 不支持热更新）；
+- 通道枚举：`ENDPOINT`（Actuator 等本进程运维入口）、`CONFIG_CENTER`（配置中心推送，预留）。
 
 可热更字段：`queueCapacity`、`batchSize`、`maxWaitMs`、`offerTimeoutMs`、`consumers`。
 
@@ -134,14 +143,25 @@ key 在**本 JVM 内唯一**；集群里每台实例各自一份同名 Worker。
 **设计约定：**
 
 - 事务、幂等、重试 → **flush 回调自己管**
-- flush 失败 → `failureHandler`，**不自动重试**
+- flush 失败 → `failureHandler`，**不自动重试**，同时自动发**批次失败告警**（见 §6）
 - 容器关闭 → `BatchProcessor.shutdown()` 尽量刷剩余数据（starter 已配 `destroyMethod`）
 
 ---
 
-## 6. 变更通知（可选）
+## 6. 通知与告警（可选）
 
-配置 `dynamic-batch.notify.platforms`，Worker **refresh 成功且 diff 非空**时异步发钉钉/企微。
+配置 `dynamic-batch.notify.platforms` 后，三类消息**触发即发**（异步，不阻塞业务线程）：
+
+| 类型 | 触发时机 | 消息内容 |
+|------|----------|----------|
+| `change` 变更通知 | Worker `refresh` 成功且 diff 非空 | 变更字段与新旧值 |
+| `offer_failed` 入队失败 | `submit` 被拒绝：已关闭 / 类型不匹配 / 队列满超时 / 中断 | 原因、入队超时、当前队列水位 |
+| `flush_failed` 批次失败 | `flush` 回调抛异常（failureHandler 处理完之后） | 失败条数、异常、数据丢失风险 |
+
+> 当前无任何配置项（阈值、静默限流、类型级路由均在规划中），事件发生即广播到全部平台；
+> 未配置 `platforms` 时通知整体关闭，纯 core（无 spring）使用无任何通知行为。
+
+**平台配置示例（ding / wechat / email）：**
 
 ```yaml
 dynamic-batch:
@@ -155,15 +175,26 @@ dynamic-batch:
       - platform: wechat
         webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
         timeout: 3000
+      - platform: email        # 需引入 spring-boot-starter-mail
+        host: "smtp.qq.com"   # SMTP 服务器
+        port: 465              # SMTP 端口（465 走 SSL）
+        username: "xxx@qq.com"
+        password: "授权码"
+        title: "dynamic-batch" # 邮件标题，默认“攒批通知”
+        receivers: "ops@corp.com"
+        timeout: 3000
 ```
 
-代码里也可调 `NotifyService` 手动发（见 example `NotifyTestController`）。
+代码里也可调 `NotifyService` 手动发（见 example `NotifyTestController`）；
+失败场景自测见 example `NotifyFailureTestController`（队列满 / 类型不匹配 / 已关闭 / 兜底接管 / 数据丢失 5 个端点）。
 
 ---
 
 ## 7. Actuator 运维端点（可选）
 
 **场景：** 单体 / 少实例 / 调试，不想接配置中心时手动热更、查状态。
+
+> 热更前提：Worker 构建时声明了 `hotUpdateType = ENDPOINT`（见 §3.3），否则 POST 返回 `refresh failed: hotUpdateType mismatch`。
 
 | 方法 | 路径 | 作用 |
 |------|------|------|
@@ -213,8 +244,10 @@ starter 启动后自动提供：
 - [ ] `BatchProperties` + YAML 绑定 Worker 参数
 - [ ] 配置中心 starter（Nacos / Spring Cloud `EnvironmentChangeEvent` → refresh）
 - [ ] 集群聚合查询 / 统一管控台
+- [ ] 告警配置化：阈值、静默限流、检测型告警（队列积压）
+- [ ] 通知路由：按通知类型指定平台 / 接收人
 
-当前：**参数写 register 或 Actuator 热更；callback 只能代码注册。**
+当前：**参数写 register 或 Actuator 热更；callback 只能代码注册；通知触发即发（无配置项）。**
 
 ---
 
@@ -224,7 +257,7 @@ starter 启动后自动提供：
 // BatchProcessor
 register(key, worker)           // 注册并启动
 submit(key, data)               // 入队
-refresh(key, configPOJO)        // 热更 + 可选通知
+refresh(key, configPOJO, type)   // 热更（type 须与 worker 声明一致）+ 变更通知
 listWorkerKeys()                // 本机 key 列表
 getWorkerInfo(key)              // 运行时快照 → BatchWorkerInfoVO
 listWorkerInfos()               // 全部快照
@@ -240,9 +273,10 @@ BatchProcessor.validateWorkerKey(key)
 
 `example-boot27`：
 
-- `BatchProcessorConfiguration` — 注册 `demo_item_insert`、`demo_item_update`
+- `BatchProcessorConfiguration` — 注册 `demo_item_insert`、`demo_item_update`（声明了 ENDPOINT 热更新通道）
 - `RefreshTestController` — 业务 Controller 调 refresh（对比 Actuator）
-- `NotifyTestController` — 通知自测
+- `NotifyTestController` — 通知自测（手动发 ding/wechat/email）
+- `NotifyFailureTestController` — 失败告警自测（offer-full / offer-type-mismatch / offer-stopped / flush-error / flush-error-loss）
 - `BatchProcessorDemoTest` — submit 演示
 
 本地跑：`mvn install -DskipTests` → `example-boot27` 启动 → curl Actuator。
