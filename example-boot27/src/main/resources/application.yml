@@ -2,6 +2,10 @@ logging:
   level:
     com.dynamicbatch: debug
 
+spring:
+  application:
+    name: example-boot27
+
 management:
   endpoints:
     web:

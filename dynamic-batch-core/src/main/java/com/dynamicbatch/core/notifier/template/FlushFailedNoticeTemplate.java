@@ -1,6 +1,7 @@
 package com.dynamicbatch.core.notifier.template;
 
 import com.dynamicbatch.common.enums.NotifyTypeEnum;
+import com.dynamicbatch.common.util.AppInstance;
 import com.dynamicbatch.core.notifier.context.FlushFailedContext;
 
 import java.time.LocalDateTime;
@@ -26,6 +27,7 @@ public class FlushFailedNoticeTemplate implements NoticeTemplate<FlushFailedCont
         StringBuilder content = new StringBuilder();
         content.append("## ⚠️ 批次执行失败\n\n");
         content.append("- worker: `").append(context.getKey()).append("`\n");
+        content.append("- 实例: `").append(AppInstance.instanceLabel()).append("`\n");
         content.append("- 失败条数: ").append(context.getFailedSize()).append("\n");
         content.append("- 异常: ").append(context.getErrorMsg()).append("\n");
         content.append("- 数据丢失风险: ")

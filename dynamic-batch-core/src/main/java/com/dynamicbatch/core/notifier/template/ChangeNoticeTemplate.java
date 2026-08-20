@@ -2,6 +2,7 @@ package com.dynamicbatch.core.notifier.template;
 
 import com.dynamicbatch.common.enums.NotifyTypeEnum;
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.common.util.AppInstance;
 import com.dynamicbatch.core.notifier.context.ChangeContext;
 
 import java.util.ArrayList;
@@ -90,6 +91,7 @@ public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
         StringBuilder content = new StringBuilder();
         content.append("## 攒批配置变更\n\n");
         content.append("- worker: `").append(key).append("`\n");
+        content.append("- 实例: `").append(AppInstance.instanceLabel()).append("`\n");
         content.append("- 变更字段: ").append(fieldNames).append("\n\n");
         for (String field : changedFields) {
             content.append("- ").append(FIELD_NAMES.get(field))

@@ -1,6 +1,7 @@
 package com.dynamicbatch.core.notifier.template;
 
 import com.dynamicbatch.common.enums.NotifyTypeEnum;
+import com.dynamicbatch.common.util.AppInstance;
 import com.dynamicbatch.core.notifier.context.OfferFailedContext;
 
 import java.time.LocalDateTime;
@@ -26,6 +27,7 @@ public class OfferFailedNoticeTemplate implements NoticeTemplate<OfferFailedCont
         StringBuilder content = new StringBuilder();
         content.append("## ⚠️ 入队失败\n\n");
         content.append("- worker: `").append(context.getKey()).append("`\n");
+        content.append("- 实例: `").append(AppInstance.instanceLabel()).append("`\n");
         content.append("- 原因: ").append(context.getReason()).append("\n");
         content.append("- 入队超时: ").append(context.getOfferTimeoutMs()).append("ms\n");
         content.append("- 当前队列: ").append(context.getQueueSize()).append("\n");
