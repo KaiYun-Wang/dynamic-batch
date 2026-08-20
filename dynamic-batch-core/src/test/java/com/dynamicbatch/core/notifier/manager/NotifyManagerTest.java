@@ -82,6 +82,19 @@ public class NotifyManagerTest {
         assertNull(fake.awaitContent(1000));
     }
 
+    @Test
+    public void queueBlockedNoticeContainsQueueWaterLevel() {
+        NotifyManager.getInstance().tryNoticeQueueBlockedAsync("wky", 80, 100, 80, 2);
+
+        String content = fake.awaitContent(2000);
+        assertNotNull(content);
+        assertTrue(content.contains("wky"));
+        assertTrue(content.contains("80/100"));
+        assertTrue(content.contains("80.0%"));
+        assertTrue(content.contains("阈值: 80%"));
+        assertTrue(content.contains("消费线程: 2"));
+    }
+
     private static NotifyPlatformPOJO platform(String name) {
         NotifyPlatformPOJO p = new NotifyPlatformPOJO();
         p.setPlatform(name);

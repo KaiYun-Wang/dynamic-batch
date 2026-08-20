@@ -150,16 +150,34 @@ key 在**本 JVM 内唯一**；集群里每台实例各自一份同名 Worker。
 
 ## 6. 通知与告警（可选）
 
-配置 `dynamic-batch.notify.platforms` 后，三类消息**触发即发**（异步，不阻塞业务线程）：
+配置 `dynamic-batch.notify.platforms` 后，消息**触发即发**（异步，不阻塞业务线程）：
 
 | 类型 | 触发时机 | 消息内容 |
 |------|----------|----------|
 | `change` 变更通知 | Worker `refresh` 成功且 diff 非空 | 变更字段与新旧值 |
 | `offer_failed` 入队失败 | `submit` 被拒绝：已关闭 / 类型不匹配 / 队列满超时 / 中断 | 原因、入队超时、当前队列水位 |
 | `flush_failed` 批次失败 | `flush` 回调抛异常（failureHandler 处理完之后） | 失败条数、异常、数据丢失风险 |
+| `queue_blocked` 队列积压 | 定时检查发现队列利用率 ≥ 阈值（见下方通知项配置） | 队列水位、利用率、阈值、消费线程数 |
 
-> 当前无任何配置项（阈值、静默限流、类型级路由均在规划中），事件发生即广播到全部平台；
 > 未配置 `platforms` 时通知整体关闭，纯 core（无 spring）使用无任何通知行为。
+
+**通知项配置（可选）：**
+
+```yaml
+dynamic-batch:
+  notify:
+    platforms: ...
+    notify-items:
+      - type: offer_failed
+        silence-period: 300        # 静默期（秒），300 秒内不再重复发送；0/不配 = 不限流
+      - type: queue_blocked         # 配了此项才启动定时检查（移除即关闭）
+        interval-seconds: 60        # 检查周期（秒），默认 60；越小发现积压越快（检测延迟 = 一个周期）
+        threshold: 80               # 队列利用率阈值（百分比），默认 70；≥ 阈值发积压告警
+        silence-period: 600         # 可选冷却期（秒）：持续积压时最多每 N 秒告警一次；不配 = 每周期告警一次
+```
+
+- `silence-period` 对所有类型生效；对 `queue_blocked` 它与检查周期**解耦**：周期决定"多久发现积压"（检测延迟 = 一个周期），静默期决定"持续积压时多久重复提醒一次"。典型组合：周期 60s + 静默 600s = 积压最长 60s 内被发现、之后每 10 分钟提醒一次；不配静默 = 每周期都告警。
+- `threshold` / `interval-seconds` 仅 `queue_blocked` 读取，其他类型配了也不读取、不校验。
 
 **平台配置示例（ding / wechat / email）：**
 
@@ -233,6 +251,7 @@ starter 启动后自动提供：
 
 - `BatchProcessor` Bean（`destroyMethod=shutdown`）
 - `NotifyProperties` + `NotifyService`（配了 notify 时）
+- `BatchWorkerMonitor` 定时检查（配了 `queue_blocked` 通知项时，见 §6）
 - `BatchEndpoint`（classpath 有 Actuator 且 exposure 包含 `dynamicbatch` 时）
 
 **不会自动：** 注册 Worker（必须业务代码 `register`）。
@@ -244,10 +263,9 @@ starter 启动后自动提供：
 - [ ] `BatchProperties` + YAML 绑定 Worker 参数
 - [ ] 配置中心 starter（Nacos / Spring Cloud `EnvironmentChangeEvent` → refresh）
 - [ ] 集群聚合查询 / 统一管控台
-- [ ] 告警配置化：阈值、静默限流、检测型告警（队列积压）
 - [ ] 通知路由：按通知类型指定平台 / 接收人
 
-当前：**参数写 register 或 Actuator 热更；callback 只能代码注册；通知触发即发（无配置项）。**
+当前：**参数写 register 或 Actuator 热更；callback 只能代码注册；事件型通知支持静默期，检测型通知（队列积压）支持周期与阈值。**
 
 ---
 
@@ -277,6 +295,7 @@ BatchProcessor.validateWorkerKey(key)
 - `RefreshTestController` — 业务 Controller 调 refresh（对比 Actuator）
 - `NotifyTestController` — 通知自测（手动发 ding/wechat/email）
 - `NotifyFailureTestController` — 失败告警自测（offer-full / offer-type-mismatch / offer-stopped / flush-error / flush-error-loss）
+- `QueueBlockedDemoController` — 队列积压告警自测（flush 卡死制造积压，看每次告警）
 - `BatchProcessorDemoTest` — submit 演示
 
 本地跑：`mvn install -DskipTests` → `example-boot27` 启动 → curl Actuator。

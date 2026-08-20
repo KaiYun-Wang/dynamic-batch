@@ -10,10 +10,12 @@ import com.dynamicbatch.core.notifier.context.ChangeContext;
 import com.dynamicbatch.core.notifier.context.FlushFailedContext;
 import com.dynamicbatch.core.notifier.context.NotifyContext;
 import com.dynamicbatch.core.notifier.context.OfferFailedContext;
+import com.dynamicbatch.core.notifier.context.QueueBlockedContext;
 import com.dynamicbatch.core.notifier.template.ChangeNoticeTemplate;
 import com.dynamicbatch.core.notifier.template.FlushFailedNoticeTemplate;
 import com.dynamicbatch.core.notifier.template.NoticeTemplate;
 import com.dynamicbatch.core.notifier.template.OfferFailedNoticeTemplate;
+import com.dynamicbatch.core.notifier.template.QueueBlockedNoticeTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -62,6 +64,7 @@ public class NotifyManager {
         registerTemplate(new ChangeNoticeTemplate());
         registerTemplate(new OfferFailedNoticeTemplate());
         registerTemplate(new FlushFailedNoticeTemplate());
+        registerTemplate(new QueueBlockedNoticeTemplate());
     }
 
     public static NotifyManager getInstance() {
@@ -142,6 +145,23 @@ public class NotifyManager {
     public void tryNoticeFlushFailedAsync(String key, int failedSize, String errorMsg, boolean dataLossRisk) {
         NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.FLUSH_FAILED,
                 new FlushFailedContext(key, failedSize, errorMsg, dataLossRisk)));
+    }
+
+    /**
+     * 队列积压告警：定时检查（spring 层 monitor）发现队列利用率超阈值时投递，异步执行立即返回。
+     *
+     * <p>阈值判断由定时任务完成，本入口只负责投递现场数据；静默期照常生效（NotifyLimiter），
+     * 可用来限制重复告警频率：检查周期决定发现延迟，静默期决定提醒间隔，两者解耦。
+     *
+     * @param key           worker 唯一标识
+     * @param queueSize     检查时刻队列中的元素数量
+     * @param queueCapacity 队列容量
+     * @param threshold     告警阈值（百分比），仅用于消息展示
+     * @param consumers     消费线程数
+     */
+    public void tryNoticeQueueBlockedAsync(String key, int queueSize, int queueCapacity, int threshold, int consumers) {
+        NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.QUEUE_BLOCKED,
+                new QueueBlockedContext(key, queueSize, queueCapacity, threshold, consumers)));
     }
 
     @SuppressWarnings("unchecked")

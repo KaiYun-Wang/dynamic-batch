@@ -16,5 +16,8 @@ public enum NotifyTypeEnum {
     OFFER_FAILED,
 
     /** 批次执行失败告警：flush 回调抛异常（含 failureHandler 是否兜住的信息） */
-    FLUSH_FAILED
+    FLUSH_FAILED,
+
+    /** 队列积压告警：定时检查发现队列利用率超阈值（周期与阈值见 notify-items 的 interval-seconds / threshold） */
+    QUEUE_BLOCKED
 }
