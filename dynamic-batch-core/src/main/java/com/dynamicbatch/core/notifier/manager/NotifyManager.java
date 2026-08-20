@@ -2,7 +2,9 @@ package com.dynamicbatch.core.notifier.manager;
 
 import com.dynamicbatch.common.enums.NotifyTypeEnum;
 import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.common.pojo.NotifyItemPOJO;
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
+import com.dynamicbatch.core.notifier.limiter.NotifyLimiter;
 import com.dynamicbatch.core.notifier.channel.NotifierRegistry;
 import com.dynamicbatch.core.notifier.context.ChangeContext;
 import com.dynamicbatch.core.notifier.context.FlushFailedContext;
@@ -78,6 +80,19 @@ public class NotifyManager {
     }
 
     /**
+     * 注入通知项配置（spring 层启动时调用，绑定 yml 的 dynamic-batch.notify.notify-items）。
+     *
+     * <p>每个通知项配置了静默期等告警行为参数，初始化后传给 {@link NotifyLimiter}。
+     * 不调此方法或传空列表时全部不限流（向后兼容）。
+     *
+     * @param items 通知项配置列表，可为空
+     */
+    public void initItems(List<NotifyItemPOJO> items) {
+        NotifyLimiter.init(items);
+        log.info("notify items initialized, items={}", items);
+    }
+
+    /**
      * 注册消息模板；同类型重复注册会覆盖旧模板。
      *
      * @param template 模板实现
@@ -135,6 +150,12 @@ public class NotifyManager {
             log.debug("notify skipped, no platforms configured, type={}, key={}", type, context.getKey());
             return;
         }
+
+        if (!NotifyLimiter.isAllowed(context.getKey(), type)) {
+            log.debug("notify skipped, silence period active, type={}, key={}", type, context.getKey());
+            return;
+        }
+
         // 注册时按模板 type() 登记，此处 cast 安全
         NoticeTemplate<NotifyContext> template = (NoticeTemplate<NotifyContext>) templates.get(type);
         if (template == null) {
@@ -146,6 +167,11 @@ public class NotifyManager {
             log.debug("notify skipped, template built nothing, type={}, key={}", type, context.getKey());
             return;
         }
+
+        // 模板构建成功 → 记录时间戳后再发送
+        // （先记录后发送：即使本次发送因网络异常失败，静默期也生效，防止重试刷屏）
+        NotifyLimiter.record(context.getKey(), type);
+
         for (NotifyPlatformPOJO platform : platforms) {
             NotifierRegistry.getInstance().send(platform, content);
         }

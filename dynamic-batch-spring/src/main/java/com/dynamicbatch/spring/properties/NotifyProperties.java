@@ -1,5 +1,6 @@
 package com.dynamicbatch.spring.properties;
 
+import com.dynamicbatch.common.pojo.NotifyItemPOJO;
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -28,11 +29,22 @@ public class NotifyProperties {
     /** 通知平台列表，platform 字段对应 Notifier.platform() */
     private List<NotifyPlatformPOJO> platforms = new ArrayList<>();
 
+    /** 通知项告警规则列表，每个条目描述一种类型的告警行为（静默期、阈值等） */
+    private List<NotifyItemPOJO> notifyItems = new ArrayList<>();
+
     public List<NotifyPlatformPOJO> getPlatforms() {
         return platforms;
     }
 
     public void setPlatforms(List<NotifyPlatformPOJO> platforms) {
         this.platforms = platforms;
+    }
+
+    public List<NotifyItemPOJO> getNotifyItems() {
+        return notifyItems;
+    }
+
+    public void setNotifyItems(List<NotifyItemPOJO> notifyItems) {
+        this.notifyItems = notifyItems;
     }
 }

@@ -23,6 +23,7 @@ public class NotifyAutoConfiguration {
     @ConditionalOnMissingBean
     public NotifyService notifyService(NotifyProperties properties) {
         NotifyManager.getInstance().init(properties.getPlatforms());
+        NotifyManager.getInstance().initItems(properties.getNotifyItems());
         return new NotifyService(properties);
     }
 }
