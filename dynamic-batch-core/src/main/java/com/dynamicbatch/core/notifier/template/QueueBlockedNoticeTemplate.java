@@ -10,7 +10,7 @@ import java.time.format.DateTimeFormatter;
 /**
  * 队列积压告警模板。
  *
- * <p>渲染定时检查发现队列利用率超阈值时的现场信息：worker、队列水位、利用率、阈值、消费线程数。
+ * <p>渲染定时检查发现队列利用率超阈值时的现场信息：分区、队列水位、利用率、阈值。
  * 内容为 markdown 列表格式（钉钉/企微均支持），与 {@link OfferFailedNoticeTemplate} 风格一致。
  */
 public class QueueBlockedNoticeTemplate implements NoticeTemplate<QueueBlockedContext> {
@@ -32,7 +32,6 @@ public class QueueBlockedNoticeTemplate implements NoticeTemplate<QueueBlockedCo
         content.append("- 队列: ").append(context.getQueueSize()).append("/").append(context.getQueueCapacity())
                 .append(" (").append(String.format("%.1f%%", utilization)).append(")\n");
         content.append("- 阈值: ").append(context.getThreshold()).append("%\n");
-        content.append("- 消费线程: ").append(context.getConsumers()).append("\n");
         content.append("- 时间: ").append(LocalDateTime.now().format(TIME_FORMAT)).append("\n");
         return content.toString();
     }

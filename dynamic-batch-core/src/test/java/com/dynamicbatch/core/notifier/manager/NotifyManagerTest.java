@@ -1,6 +1,6 @@
 package com.dynamicbatch.core.notifier.manager;
 
-import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
 import com.dynamicbatch.core.notifier.channel.Notifier;
 import com.dynamicbatch.core.notifier.channel.NotifierRegistry;
@@ -32,8 +32,8 @@ public class NotifyManagerTest {
 
     @Test
     public void changeNoticeContainsKeyAndChangedFields() {
-        BatchWorkerConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L, 1);
-        BatchWorkerConfigPOJO newConfig = new BatchWorkerConfigPOJO();
+        BatchWorkerGroupConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L);
+        BatchWorkerGroupConfigPOJO newConfig = new BatchWorkerGroupConfigPOJO();
         newConfig.setQueueCapacity(2000);
         newConfig.setBatchSize(200);
 
@@ -50,8 +50,8 @@ public class NotifyManagerTest {
 
     @Test
     public void sameValuesSkipsSend() {
-        BatchWorkerConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L, 1);
-        BatchWorkerConfigPOJO newConfig = new BatchWorkerConfigPOJO();
+        BatchWorkerGroupConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L);
+        BatchWorkerGroupConfigPOJO newConfig = new BatchWorkerGroupConfigPOJO();
         // 与旧值相同：不应发送，避免相同配置反复推送刷屏
         newConfig.setQueueCapacity(1000);
         newConfig.setBatchSize(100);
@@ -63,9 +63,9 @@ public class NotifyManagerTest {
 
     @Test
     public void nullFieldsAreIgnoredInDiff() {
-        BatchWorkerConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L, 1);
+        BatchWorkerGroupConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L);
         // 全 null = 无更新意图，不应发送
-        NotifyManager.getInstance().tryNoticeChangeAsync("k", oldConfig, new BatchWorkerConfigPOJO());
+        NotifyManager.getInstance().tryNoticeChangeAsync("k", oldConfig, new BatchWorkerGroupConfigPOJO());
 
         assertNull(fake.awaitContent(1000));
     }
@@ -73,8 +73,8 @@ public class NotifyManagerTest {
     @Test
     public void noPlatformsSkipsSend() {
         NotifyManager.getInstance().init(Collections.emptyList());
-        BatchWorkerConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L, 1);
-        BatchWorkerConfigPOJO newConfig = new BatchWorkerConfigPOJO();
+        BatchWorkerGroupConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L);
+        BatchWorkerGroupConfigPOJO newConfig = new BatchWorkerGroupConfigPOJO();
         newConfig.setQueueCapacity(2000);
 
         NotifyManager.getInstance().tryNoticeChangeAsync("k", oldConfig, newConfig);
@@ -84,7 +84,7 @@ public class NotifyManagerTest {
 
     @Test
     public void queueBlockedNoticeContainsQueueWaterLevel() {
-        NotifyManager.getInstance().tryNoticeQueueBlockedAsync("wky", 80, 100, 80, 2);
+        NotifyManager.getInstance().tryNoticeQueueBlockedAsync("wky", 80, 100, 80);
 
         String content = fake.awaitContent(2000);
         assertNotNull(content);
@@ -92,7 +92,6 @@ public class NotifyManagerTest {
         assertTrue(content.contains("80/100"));
         assertTrue(content.contains("80.0%"));
         assertTrue(content.contains("阈值: 80%"));
-        assertTrue(content.contains("消费线程: 2"));
     }
 
     private static NotifyPlatformPOJO platform(String name) {
@@ -101,14 +100,13 @@ public class NotifyManagerTest {
         return p;
     }
 
-    private static BatchWorkerConfigPOJO fullConfig(int queueCapacity, int batchSize,
-                                                    long maxWaitMs, long offerTimeoutMs, int consumers) {
-        BatchWorkerConfigPOJO config = new BatchWorkerConfigPOJO();
+    private static BatchWorkerGroupConfigPOJO fullConfig(int queueCapacity, int batchSize,
+                                                    long maxWaitMs, long offerTimeoutMs) {
+        BatchWorkerGroupConfigPOJO config = new BatchWorkerGroupConfigPOJO();
         config.setQueueCapacity(queueCapacity);
         config.setBatchSize(batchSize);
         config.setMaxWaitMs(maxWaitMs);
         config.setOfferTimeoutMs(offerTimeoutMs);
-        config.setConsumers(consumers);
         return config;
     }
 

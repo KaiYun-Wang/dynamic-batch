@@ -130,10 +130,10 @@ public class NotifyFailureTestController {
                 + "（失败已触发钉钉告警，当前队列剩余=" + slowConsumerWorker.getQueueSize() + "）";
     }
 
-    /** 入队失败：类型不匹配（向 DemoItem worker 提交 String） */
+    /** 入队失败：类型不匹配（向 DemoItem worker 组提交 String） */
     @PostMapping("/offer-type-mismatch")
     public String offerTypeMismatch() {
-        boolean ok = batchProcessor.submit(FULL_WORKER, "不是 DemoItem 类型");
+        boolean ok = batchProcessor.submit(FULL_WORKER, "type-mismatch", "不是 DemoItem 类型");
         return "提交返回=" + ok + "（应为 false，已触发类型不匹配告警）";
     }
 

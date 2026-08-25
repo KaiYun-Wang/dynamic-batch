@@ -1,8 +1,7 @@
 package com.dynamicbatch.example.config;
 
-import com.dynamicbatch.common.enums.BatchWorkerHotUpdateType;
 import com.dynamicbatch.core.BatchProcessor;
-import com.dynamicbatch.core.BatchWorker;
+import com.dynamicbatch.core.BatchWorkerGroup;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -12,7 +11,7 @@ import javax.annotation.PostConstruct;
 
 /**
  * 对齐 yikekong 的 BatchWriterConfiguration：
- * 注入 BatchProcessor，在 @PostConstruct 里 register。
+ * 注入 BatchProcessor，在 @PostConstruct 里 registerGroup。
  */
 @Configuration
 public class BatchProcessorConfiguration {
@@ -30,9 +29,8 @@ public class BatchProcessorConfiguration {
 
     @PostConstruct
     public void registerWriters() {
-        batchProcessor.register(DEMO_INSERT,
-                BatchWorker.builder(DemoItem.class, batch -> log.info("demo insert flush ok, size={}, first={}", batch.size(), batch.get(0)))
-                        .hotUpdateType(BatchWorkerHotUpdateType.ENDPOINT)
+        batchProcessor.registerGroup(DEMO_INSERT,
+                BatchWorkerGroup.builder(DemoItem.class, batch -> log.info("demo insert flush ok, size={}, first={}", batch.size(), batch.get(0)))
                         .queueCapacity(100)
                         .batchSize(5)
                         .maxWaitMs(2000)
@@ -40,17 +38,17 @@ public class BatchProcessorConfiguration {
                         .failureHandler(failed -> log.error("demo insert flush failed, size={}", failed.size()))
                         .build()
         );
-        batchProcessor.register(DEMO_UPDATE,
-                BatchWorker.builder(DemoItem.class, batch -> log.info("demo update flush ok, size={}, first={}", batch.size(), batch.get(0)))
+        batchProcessor.registerGroup(DEMO_UPDATE,
+                BatchWorkerGroup.builder(DemoItem.class, batch -> log.info("demo update flush ok, size={}, first={}", batch.size(), batch.get(0)))
                         .queueCapacity(256)
                         .batchSize(20)
                         .maxWaitMs(500)
                         .offerTimeoutMs(50)
-                        .consumers(2)
+                        .partitionCount(2)
                         .failureHandler(failed -> log.error("demo update flush failed, size={}", failed.size()))
                         .build()
         );
-        log.info("批处理器注册完成: {}, {}", DEMO_INSERT, DEMO_UPDATE);
+        log.info("批处理注册完成: {}, {}", DEMO_INSERT, DEMO_UPDATE);
     }
 
     /** 示例数据类型 */

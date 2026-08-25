@@ -1,7 +1,7 @@
 package com.dynamicbatch.core.notifier.manager;
 
 import com.dynamicbatch.common.enums.NotifyTypeEnum;
-import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.NotifyItemPOJO;
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
 import com.dynamicbatch.core.notifier.limiter.NotifyLimiter;
@@ -117,7 +117,7 @@ public class NotifyManager {
      * @param oldConfig 变更前生效中的配置快照（全字段非 null）
      * @param newConfig 本次传入的配置（可能部分字段为 null）
      */
-    public void tryNoticeChangeAsync(String key, BatchWorkerConfigPOJO oldConfig, BatchWorkerConfigPOJO newConfig) {
+    public void tryNoticeChangeAsync(String key, BatchWorkerGroupConfigPOJO oldConfig, BatchWorkerGroupConfigPOJO newConfig) {
         NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.CHANGE, new ChangeContext(key, oldConfig, newConfig)));
     }
 
@@ -153,15 +153,14 @@ public class NotifyManager {
      * <p>阈值判断由定时任务完成，本入口只负责投递现场数据；静默期照常生效（NotifyLimiter），
      * 可用来限制重复告警频率：检查周期决定发现延迟，静默期决定提醒间隔，两者解耦。
      *
-     * @param key           worker 唯一标识
+     * @param key          分区唯一标识（"{组key}-{分区序号}"）
      * @param queueSize     检查时刻队列中的元素数量
      * @param queueCapacity 队列容量
      * @param threshold     告警阈值（百分比），仅用于消息展示
-     * @param consumers     消费线程数
      */
-    public void tryNoticeQueueBlockedAsync(String key, int queueSize, int queueCapacity, int threshold, int consumers) {
+    public void tryNoticeQueueBlockedAsync(String key, int queueSize, int queueCapacity, int threshold) {
         NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.QUEUE_BLOCKED,
-                new QueueBlockedContext(key, queueSize, queueCapacity, threshold, consumers)));
+                new QueueBlockedContext(key, queueSize, queueCapacity, threshold)));
     }
 
     @SuppressWarnings("unchecked")

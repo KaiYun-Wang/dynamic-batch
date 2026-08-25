@@ -12,7 +12,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 往已注册的 Worker 里塞数据（类似业务 MQ 消费后 submit）。
+ * 往已注册的 Worker 组里塞数据（类似业务 MQ 消费后 submit，带路由 key）。
  */
 @SpringBootTest(classes = ExampleBoot27Application.class)
 public class BatchProcessorDemoTest {
@@ -27,6 +27,7 @@ public class BatchProcessorDemoTest {
         for (int i = 0; i < 12; i++) {
             boolean ok = batchProcessor.submit(
                     BatchProcessorConfiguration.DEMO_INSERT,
+                    "id-" + i,
                     new DemoItem("id-" + i));
             if (!ok) {
                 log.warn("submit failed at {}", i);

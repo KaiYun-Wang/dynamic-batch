@@ -1,7 +1,7 @@
 package com.dynamicbatch.core.notifier.template;
 
 import com.dynamicbatch.common.enums.NotifyTypeEnum;
-import com.dynamicbatch.common.pojo.BatchWorkerConfigPOJO;
+import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.util.AppInstance;
 import com.dynamicbatch.core.notifier.context.ChangeContext;
 
@@ -21,7 +21,7 @@ import java.util.stream.Collectors;
  */
 public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
 
-    /** 配置字段中文名，用于通知内容可读性；按 BatchWorkerConfigPOJO 声明顺序排列 */
+    /** 配置字段中文名，用于通知内容可读性；按 BatchWorkerGroupConfigPOJO 声明顺序排列 */
     private static final Map<String, String> FIELD_NAMES = new LinkedHashMap<>();
 
     static {
@@ -29,7 +29,6 @@ public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
         FIELD_NAMES.put("batchSize", "攒批条数");
         FIELD_NAMES.put("maxWaitMs", "最大等待(ms)");
         FIELD_NAMES.put("offerTimeoutMs", "入队超时(ms)");
-        FIELD_NAMES.put("consumers", "消费线程数");
     }
 
     @Override
@@ -40,8 +39,8 @@ public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
     @Override
     public String build(ChangeContext context) {
         String key = context.getKey();
-        BatchWorkerConfigPOJO oldConfig = context.getOldConfig();
-        BatchWorkerConfigPOJO newConfig = context.getNewConfig();
+        BatchWorkerGroupConfigPOJO oldConfig = context.getOldConfig();
+        BatchWorkerGroupConfigPOJO newConfig = context.getNewConfig();
         List<String> changedFields = diffFields(oldConfig, newConfig);
         if (changedFields.isEmpty()) {
             return null;
@@ -49,7 +48,7 @@ public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
         return buildContent(key, oldConfig, newConfig, changedFields);
     }
 
-    private static List<String> diffFields(BatchWorkerConfigPOJO oldConfig, BatchWorkerConfigPOJO newConfig) {
+    private static List<String> diffFields(BatchWorkerGroupConfigPOJO oldConfig, BatchWorkerGroupConfigPOJO newConfig) {
         List<String> changed = new ArrayList<>();
         if (newConfig.getQueueCapacity() != null
                 && !Objects.equals(newConfig.getQueueCapacity(), oldConfig.getQueueCapacity())) {
@@ -67,10 +66,6 @@ public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
                 && !Objects.equals(newConfig.getOfferTimeoutMs(), oldConfig.getOfferTimeoutMs())) {
             changed.add("offerTimeoutMs");
         }
-        if (newConfig.getConsumers() != null
-                && !Objects.equals(newConfig.getConsumers(), oldConfig.getConsumers())) {
-            changed.add("consumers");
-        }
         return changed;
     }
 
@@ -83,8 +78,8 @@ public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
      * 不用 dynamic-tp 的 \n\n 空行 + <font color=#hex> 方案，
      * 因为 <font> 十六进制色值是钉钉专有语法，企微只认 green/info/warning 等关键字）。
      */
-    private static String buildContent(String key, BatchWorkerConfigPOJO oldConfig,
-                                       BatchWorkerConfigPOJO newConfig, List<String> changedFields) {
+    private static String buildContent(String key, BatchWorkerGroupConfigPOJO oldConfig,
+                                       BatchWorkerGroupConfigPOJO newConfig, List<String> changedFields) {
         String fieldNames = changedFields.stream()
                 .map(FIELD_NAMES::get)
                 .collect(Collectors.joining(", "));
@@ -102,7 +97,7 @@ public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
         return content.toString();
     }
 
-    private static Object getFieldValue(BatchWorkerConfigPOJO config, String field) {
+    private static Object getFieldValue(BatchWorkerGroupConfigPOJO config, String field) {
         switch (field) {
             case "queueCapacity":
                 return config.getQueueCapacity();
@@ -112,8 +107,6 @@ public class ChangeNoticeTemplate implements NoticeTemplate<ChangeContext> {
                 return config.getMaxWaitMs();
             case "offerTimeoutMs":
                 return config.getOfferTimeoutMs();
-            case "consumers":
-                return config.getConsumers();
             default:
                 return null;
         }
