@@ -1,0 +1,174 @@
+# dynamic-batch-spool
+
+磁盘级 FIFO 缓冲队列（Spool）：基于 [Chronicle-Queue](https://github.com/OpenHFT/Chronicle-Queue) 的薄封装。
+数据先落盘再消费，内存有界、磁盘即容量——给"上游突发写入、下游消费跟不上"的场景做缓冲蓄水池。
+
+## 核心作用
+
+```
+生产者 ──append──> 暂存队列(内存) ──单写线程──> Chronicle-Queue(mmap 落盘) ──poll──> 消费者
+                        │                            │                              │
+                    有界，满则等               按时间滚动文件                 读位置自动持久化
+                    崩溃会丢                 tailer 读完自动删旧文件
+```
+
+- **写路径零锁**：生产者只入有界暂存队列（微秒级），后台单写线程串行落盘
+- **读路径单锁**：任意线程可并发 poll，锁内串行化共享 tailer，不重复不遗漏
+- **磁盘即容量**：消费暂停时数据堆积在磁盘，不占内存
+- **可独立复用**：模块零 Spring 依赖，可整体拷到其他项目当缓冲池
+
+## 工作原理
+
+### 写路径
+
+`append(T)` 序列化后进入有界暂存队列（`LinkedBlockingQueue`），返回 true 仅代表**已进入内存暂存队列**。
+后台单写线程批量取出（最多 128 条/批）写入 Chronicle-Queue（mmap 追加写，顺序 IO 高效）。
+
+### 读路径
+
+`poll(lockTimeoutMs)` 用一把非公平 `ReentrantLock` 串行化共享 tailer（命名 tailer `spool-tailer`），
+锁内读取并推进游标。语义：**lockTimeoutMs 是获取锁的最长等待**；拿到锁后读一次——有数据返回，
+队列空**立即返回 null**（不等待）。**锁超时抛 `TimeoutException`**，调用方据此区分"队列空"与"并发读过载"。
+**poll 即交付**：取出即视为调用方职责，无 ack/commit 机制。
+
+### 文件滚动
+
+按时间滚动（默认 `FIVE_MINUTELY` 5 分钟，可用 `rollCycleMillis()` 指定任意毫秒数）。
+每个周期一个独立 `.cq4` 文件，文件名 = 该周期起始时间的格式化字符串。
+
+### 文件删除
+
+`SpoolTimer` 后台线程定期（默认 = 滚动周期，可用 `cleanupIntervalMs()` 单独指定）调用清理逻辑：
+以 tailer 当前正在读的文件（`tailer.currentFile()`）为界，**文件名比它小的（时间更早）都已读完，删除**，
+遇到当前文件即停止。纯字符串比较，不解析时间、不涉及时区。
+
+### 目录独占锁
+
+打开目录时获取 `.spool.lock` 文件锁，同目录第二个进程/实例直接抛异常 fail fast，
+从根上防止多进程操作同一目录。**一个目录只能被一个 Spool 实例打开。**
+
+## 快速开始
+
+```xml
+<dependency>
+    <groupId>com.dynamicbatch</groupId>
+    <artifactId>dynamic-batch-spool</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+</dependency>
+```
+
+```java
+// 1. 数据对象实现 Serializable（默认 JDK 原生序列化，所以需要实现java.io.Serializable）
+public class DeviceDTO implements java.io.Serializable {
+    private static final long serialVersionUID = 1L;
+    private long id;
+    private String name;
+    // ...
+}
+
+// 2. 构造 Spool（不用传序列化器，默认 JDK 原生）
+Spool<DeviceDTO> spool = Spool.builder(DeviceDTO.class, "/data/spool-device")
+        .stagingCapacity(10000)      // 暂存队列容量（条数）
+        .flushIntervalMs(5000)       // 刷盘间隔：断电最多丢 5 秒数据
+        .rollCycleMillis(30_000)     // 30 秒滚一个文件（或 .rollCycle(RollCycles.FIVE_MINUTELY)）
+        .offerTimeoutMs(100)         // 暂存队列满时最多等 100ms
+        .cleanupIntervalMs(60_000)   // 每 60 秒清理一次已消费的旧文件
+        .build();
+
+// 3. 生产者（任意线程）
+boolean ok = spool.append(deviceDTO);
+if (!ok) {
+    // 降级：暂存队列满，丢弃并告警或转本地文件
+}
+
+// 4. 消费者：lockTimeoutMs=1000 是获取锁的最长等待
+//    有数据 → 返回对象；空队列 → 立即返回 null；锁超时 → 抛 TimeoutException
+DeviceDTO dto = spool.poll(1000);
+if (dto == null) {
+    // 队列暂时没数据
+}
+
+// 5. 关闭（排空暂存 + 刷盘 + 释放目录锁）
+spool.close();
+```
+
+## 自定义序列化器（换 JSON / Kryo 等）
+
+默认 JDK 原生（对象需实现 `Serializable`）。想换格式，实现 `Serializer<T>` 接口即可——就两个方法：
+`serialize(T)` 对象 → 字节（落盘用），`deserialize(byte[], Class<T>)` 字节 → 对象（还原用）。
+
+```java
+// Jackson 示例
+Serializer<DeviceDTO> json = new Serializer<DeviceDTO>() {
+    final ObjectMapper mapper = new ObjectMapper();
+
+    @Override
+    public byte[] serialize(DeviceDTO data) {
+        try { return mapper.writeValueAsBytes(data); }
+        catch (Exception e) { throw new RuntimeException(e); }
+    }
+
+    @Override
+    public DeviceDTO deserialize(byte[] bytes, Class<DeviceDTO> type) {
+        try { return mapper.readValue(bytes, type); }
+        catch (Exception e) { throw new RuntimeException(e); }
+    }
+};
+
+Spool<DeviceDTO> spool = Spool.builder(DeviceDTO.class, "/data/spool-device")
+        .serializer(json)            // 覆盖默认序列化器
+        .build();
+```
+
+## 定位与边界
+
+**单进程内使用**。本模块给原本非并发安全的 Chronicle-Queue 封装了多线程并发安全：
+
+- **多线程写**：生产者只入有界暂存队列（线程安全容器），后台单写线程串行落盘——任意线程可并发 `append`
+- **多线程读**：共享 tailer 由一把锁串行化——任意线程可并发 `poll`，不重复不遗漏
+- **多进程**：不保证并发安全，靠目录独占锁（`.spool.lock`）在打开时 fail fast 拦截第二个进程
+
+> 目录锁是**协作式**的：只拦住"走正常流程尝试加锁"的第二个实例。如果其他程序不管锁、直接改目录里的文件，照样会改坏数据——**队列目录是内部文件，必须信任使用方不越权操作**。
+
+## 配置参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `type` / `dir` | 必填 | 数据类型 / 队列目录 |
+| `serializer` | JDK 原生 | 序列化器，不传默认 JDK（对象需 Serializable），可用 `.serializer()` 换 JSON/Kryo 等 |
+| `stagingCapacity` | 10000 | 暂存队列容量（条数），满则 append 阻塞等待 |
+| `offerTimeoutMs` | 100 | 暂存队列满时 append 最多等多久，超时返回 false |
+| `flushIntervalMs` | 5000 | 刷盘间隔，断电丢失窗口 = 该值 |
+| `rollCycle` / `rollCycleMillis` | FIVE_MINUTELY | 文件滚动周期，可传 `RollCycles` 枚举或毫秒数 |
+| `cleanupIntervalMs` | 0（=滚动周期） | 清理已消费旧文件的间隔，滚动周期大时建议单独调小 |
+| `maxSizeBytes` | 0（不限） | 磁盘预算上限（预留，当前未强制） |
+
+## 注意事项
+
+### 宕机丢失风险（按丢失窗口从小到大）
+
+| 资源 | 丢失窗口 | 后果 |
+|------|---------|------|
+| **暂存队列（内存）** | 写线程未取走的数据（≤ stagingCapacity 条） | **真丢**：append 返回 true ≠ 已持久化 |
+| **未 sync 的 mmap 脏页** | 最后 flushIntervalMs 内的写入 | **真丢**（仅断电/OS 崩溃；kill -9 时 OS 仍在，page cache 通常能回写） |
+| **读位置（offset）** | 最近少量已读记录 | **不丢**：重启后从断点续读，可能**重复消费**最近几条，消费端需幂等兜底 |
+| **已 poll 未处理完** | poll 即交付 | **真丢**：读位置已推进，重启后跳过不补发。接受的设计取舍，处理失败需调用方自行重试 |
+
+一句话：**内存丢数据、断电丢磁盘数据、offset 回退只产生重复消费**。
+
+### 删除文件的延时风险
+
+清理逻辑以 `tailer.currentFile()` 为界，且由后台线程**周期性**触发（默认 = 滚动周期）：
+
+1. **消费停止 → 磁盘不释放**：tailer 不前进，旧文件永远不会被删，数据全部留在磁盘。这是设计意图（磁盘即容量），但需确保磁盘预算充足
+2. **删除最长滞后一个清理周期**：即使数据已读完，也要等下一次定时任务触发才删
+3. **tailer 当前所在文件不删**：最后一个被读的文件要等 tailer 进入下一个周期才删除，属预期行为
+4. **Windows 删除失败**：文件被其他程序占用时删除失败，记日志、下次清理重试（Linux 无此问题）
+
+### 其他
+
+- **目录独占**：一个目录只允许一个 Spool 实例；不同类型的数据用不同目录（`Spool<DeviceDTO>` 与 `Spool<UserDTO>` 不能共用目录）
+- **多进程**：不支持多进程读写同一目录（目录锁直接挡掉）
+- **多线程并发 poll**：支持但**不保证单个消费者视角有序**；需要保序时用「单 reader 线程 + 线程池 worker」模式
+- **poll 出去的数据**：Spool 不追踪处理结果，下游拒绝时必须自行重试同一条，不能丢弃
+- **队列目录是内部文件**：`.cq4` 数据文件、`metadata.cq4t` 元数据，不要手动打开/修改/删除

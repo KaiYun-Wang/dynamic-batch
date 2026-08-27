@@ -1,0 +1,128 @@
+package com.dynamicbatch.spool;
+
+import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptTailer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.Closeable;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Stream;
+
+/**
+ * Spool 读路径：锁保护共享 tailer + 文件清理。
+ * <p>使用 Chronicle 命名 tailer（持久化读位置），重启后从断点续读。
+ * 多线程并发 poll 由一把非公平 {@link ReentrantLock} 串行化。
+ */
+class SpoolReader implements Closeable {
+
+    private static final Logger log = LoggerFactory.getLogger(SpoolReader.class);
+
+    private final ReentrantLock lock = new ReentrantLock(false);
+    private final ExcerptTailer tailer;
+    private final ChronicleQueue chronicleQueue;
+    private final SpoolConfig config;
+
+    SpoolReader(SpoolConfig config, ChronicleQueue chronicleQueue) {
+        this.config = config;
+        this.chronicleQueue = chronicleQueue;
+        // 命名 tailer：Chronicle 自动持久化读位置到 metadata 文件
+        this.tailer = chronicleQueue.createTailer("spool-tailer");
+    }
+
+    /**
+     * 读取一条数据，线程安全（锁内串行化）。
+     * <p>语义：{@code lockTimeoutMs} 是获取锁的最长等待；拿到锁后读一次——
+     * 有数据返回，队列空立即返回 null（不等待）。锁超时抛 {@link java.util.concurrent.TimeoutException}，
+     * 调用方据此区分"队列空"与"并发读过载"。</p>
+     * <p>中断（仅进程关闭时发生）在内部吞掉并恢复中断标志：读位置未推进、不丢数据，返回 null 即可。</p>
+     *
+     * @param lockTimeoutMs 获取锁的最长等待（毫秒）
+     * @return 数据字节数组；队列为空返回 null
+     * @throws TimeoutException 获取锁超时（并发读压力过大）
+     */
+    byte[] poll(long lockTimeoutMs) throws TimeoutException {
+        boolean locked;
+        try {
+            locked = lock.tryLock(lockTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt(); // 恢复中断标志，上层可感知退出信号
+            return null;                       // 中断场景读不到数据不丢，等同无数据
+        }
+        if (!locked) {
+            throw new TimeoutException("lock acquire timeout after " + lockTimeoutMs + "ms");
+        }
+        try {
+            Bytes<?> bytes = Bytes.allocateElasticDirect();
+            if (tailer.readBytes(bytes)) {
+                return bytes.toByteArray();
+            }
+            return null; // 队列空，立即返回
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public void close() {
+        log.info("spool reader closed");
+    }
+
+    /**
+     * 删除 tailer 已消费完的旧 cycle 文件。由 {@link SpoolTimer} 定期调用。
+     * <p>以 tailer 当前正在读的文件为界（{@code tailer.currentFile()}），
+     * 文件名比它小的（时间更早）都说明已读完，删；遇到它就停。</p>
+     */
+    void deleteConsumedCycles() {
+        lock.lock();
+        try {
+            doDeleteConsumedCycles();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void doDeleteConsumedCycles() {
+        File current = tailer.currentFile();
+        if (current == null) return;
+        String currentName = current.getName();
+
+        Path dir = config.dir;
+        if (!Files.isDirectory(dir)) return;
+
+        // 文件名按时间排序 = 字典序，比当前文件小的都删，遇到当前文件就停
+        try (Stream<Path> stream = Files.list(dir)) {
+            // ponytail: JDK8 无 takeWhile，用循环
+            java.util.List<Path> sorted = new java.util.ArrayList<>();
+            stream.filter(p -> p.toString().endsWith(".cq4"))
+                    .sorted()
+                    .forEach(sorted::add);
+            for (Path p : sorted) {
+                if (p.getFileName().toString().compareTo(currentName) >= 0) break;
+                deleteQuietly(p);
+            }
+        } catch (IOException e) {
+            log.warn("cleanup list failed", e);
+        }
+    }
+
+    // ======================== 文件删除（无锁，外部已持锁） ========================
+
+    private void deleteQuietly(Path file) {
+        try {
+            Files.deleteIfExists(file);
+            log.debug("deleted old cycle file: {}", file.getFileName());
+        } catch (IOException e) {
+            log.warn("failed to delete old cycle file: {}", file.getFileName());
+        }
+    }
+
+     // ======================== 文件清理 ========================
+}

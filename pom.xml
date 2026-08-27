@@ -10,12 +10,13 @@
     <packaging>pom</packaging>
 
     <name>Dynamic Batch</name>
-    <description>轻量进程内攒批（循序渐进：当前只实现 core）</description>
+    <description>轻量进程内攒批</description>
 
     <modules>
         <module>dynamic-batch-dependencies</module>
         <module>dynamic-batch-common</module>
         <module>dynamic-batch-core</module>
+        <module>dynamic-batch-spool</module>
         <module>dynamic-batch-spring</module>
         <module>dynamic-batch-spring-boot-starter</module>
         <module>example-boot27</module>
@@ -65,6 +66,11 @@
                 <version>${project.version}</version>
             </dependency>
             <dependency>
+                <groupId>com.dynamicbatch</groupId>
+                <artifactId>dynamic-batch-spool</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>cn.hutool</groupId>
                 <artifactId>hutool-all</artifactId>
                 <version>${hutool.version}</version>
@@ -90,10 +96,21 @@
                 <version>${slf4j.version}</version>
             </dependency>
             <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-simple</artifactId>
+                <version>${slf4j.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
                 <groupId>junit</groupId>
                 <artifactId>junit</artifactId>
                 <version>${junit.version}</version>
                 <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>net.openhft</groupId>
+                <artifactId>chronicle-queue</artifactId>
+                <version>2026.6</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
