@@ -10,10 +10,8 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Spool 定时任务：定期刷盘（sync），让后台线程承担定时工作。
- * <p>自身不持有数据，只引用 {@link SpoolWriter} 并定期调用其 sync 方法。
+ * <p>自身不持有数据，只引用 {@link SpoolWriter} 和 {@link SpoolReader} 并定期 sync。
  * 使用单线程调度器，sync 是轻量操作（只刷当前 mmap 文件脏页），不会阻塞数据读写。</p>
- *
- * <p>offset 持久化由 Chronicle 命名 tailer 自动完成，不在此处理。</p>
  */
 class SpoolTimer implements Closeable {
 
@@ -29,12 +27,17 @@ class SpoolTimer implements Closeable {
             return t;
         });
 
-        // 定时刷盘
+        // 定时刷盘：数据 + offset 一起刷，保持同一节奏
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 writer.sync();
             } catch (Exception e) {
                 log.error("spool timer sync error", e);
+            }
+            try {
+                reader.syncIndex();
+            } catch (Exception e) {
+                log.error("spool timer syncIndex error", e);
             }
         }, flushIntervalMs, flushIntervalMs, TimeUnit.MILLISECONDS);
 
