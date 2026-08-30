@@ -21,22 +21,25 @@ class SpoolWriter implements Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(SpoolWriter.class);
 
-    /** 写线程无数据时轮询间隔 */
+    /** 写线程无数据时轮询间隔（毫秒） */
     private static final long POLL_INTERVAL_MS = 100;
-    /** 每次批量 drain 上限 */
+    /** 每次批量 drain 上限（条） */
     private static final int DRAIN_MAX = 128;
 
-    private final LinkedBlockingQueue<byte[]> stagingQueue;
-    private final ExcerptAppender appender;
-    private final ChronicleQueue chronicleQueue;
+    /** 构建期配置（只读） */
     private final SpoolConfig config;
-
+    /** 内存暂存队列：生产者入队，写线程批量落盘 */
+    private final LinkedBlockingQueue<byte[]> stagingQueue;
+    /** Chronicle 追加写入口 */
+    private final ExcerptAppender appender;
+    /** 写循环是否运行中 */
     private volatile boolean running;
+    /** 后台单写线程 */
     private Thread writeThread;
 
     SpoolWriter(SpoolConfig config, ChronicleQueue chronicleQueue) {
         this.config = config;
-        this.chronicleQueue = chronicleQueue;
+        /* Chronicle-Queue 实例（创建 appender 用） */
         this.stagingQueue = new LinkedBlockingQueue<>(config.stagingCapacity);
         this.appender = chronicleQueue.createAppender();
     }

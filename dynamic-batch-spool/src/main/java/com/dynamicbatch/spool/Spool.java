@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -34,41 +35,55 @@ public class Spool<T> implements Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(Spool.class);
 
+    /** 目录独占锁文件名 */
     private static final String LOCK_FILE = ".spool.lock";
 
+    // Chronicle 全局开关：关启动公告；允许多线程通过同一 queue 创建 appender/tailer（本模块自行串行化写/读）
     static {
         System.setProperty("chronicle.announcer.disable", "true");
         System.setProperty("disable.single.threaded.check", "true");
     }
 
+    /** 数据类型，反序列化时使用 */
     private final Class<T> type;
+    /** 序列化器：对象 ↔ byte[] */
     private final Serializer<T> serializer;
-    private final ChronicleQueue chronicleQueue;
-    private final SpoolWriter writer;
-    private final SpoolReader reader;
-    private final SpoolTimer timer;
-    private final FileLock dirLock;
-    private final RandomAccessFile lockFile;
-
+    /** 构建期配置（只读） */
+    private final SpoolConfig config;
+    /** 队列目录路径（与 config.dir 相同，便于对外暴露） */
     private final Path dir;
-
+    /** Chronicle-Queue 实例 */
+    private final ChronicleQueue chronicleQueue;
+    /** 写路径：暂存队列 + 单写线程 */
+    private final SpoolWriter writer;
+    /** 读路径：共享 tailer + 清理 */
+    private final SpoolReader reader;
+    /** 定时刷盘 / 清理 / 刷新占用 */
+    private final SpoolTimer timer;
+    /** 目录独占文件锁 */
+    private final FileLock dirLock;
+    /** 目录锁对应的 RandomAccessFile，关闭时一并释放 */
+    private final RandomAccessFile lockFile;
+    /** 目录当前占用（字节），由 {@link #refreshDiskUsage()} 刷新 */
+    private volatile long currentSizeBytes;
+    /** 是否已关闭 */
     private volatile boolean closed;
 
     private Spool(Builder<T> builder) {
         this.type = Objects.requireNonNull(builder.type, "type must not be null");
         this.serializer = Objects.requireNonNull(builder.serializer, "serializer must not be null");
-        SpoolConfig cfg = builder.toConfig();
-        this.dir = cfg.dir;
+        this.config = builder.toConfig();
+        this.dir = this.config.dir;
 
         // 确保目录存在
         try {
-            Files.createDirectories(cfg.dir);
+            Files.createDirectories(this.config.dir);
         } catch (IOException e) {
-            throw new RuntimeException("failed to create spool directory: " + cfg.dir, e);
+            throw new RuntimeException("failed to create spool directory: " + this.config.dir, e);
         }
 
         // 目录独占锁：同目录第二个进程/实例直接 fail fast
-        Path lockPath = cfg.dir.resolve(LOCK_FILE);
+        Path lockPath = this.config.dir.resolve(LOCK_FILE);
         FileLock tmpLock = null;
         RandomAccessFile tmpLockFile = null;
         try {
@@ -77,34 +92,39 @@ public class Spool<T> implements Closeable {
             if (tmpLock == null) {
                 tmpLockFile.close();
                 throw new IllegalStateException(
-                        "spool directory already locked by another process: " + cfg.dir);
+                        "spool directory already locked by another process: " + this.config.dir);
             }
         } catch (OverlappingFileLockException e) {
             throw new IllegalStateException(
-                    "spool directory locked within same JVM: " + cfg.dir, e);
+                    "spool directory locked within same JVM: " + this.config.dir, e);
         } catch (IOException e) {
-            throw new RuntimeException("failed to lock spool directory: " + cfg.dir, e);
+            throw new RuntimeException("failed to lock spool directory: " + this.config.dir, e);
         }
         this.dirLock = tmpLock;
         this.lockFile = tmpLockFile;
 
         // 创建 Chronicle-Queue
         try {
-            this.chronicleQueue = ChronicleQueue.singleBuilder(cfg.dir.toFile())
-                    .rollCycle(cfg.rollCycle)
+            this.chronicleQueue = ChronicleQueue.singleBuilder(this.config.dir.toFile())
+                    .rollCycle(this.config.rollCycle)
                     .build();
         } catch (Exception e) {
             releaseLock();
-            throw new RuntimeException("failed to create ChronicleQueue at: " + cfg.dir, e);
+            throw new RuntimeException("failed to create ChronicleQueue at: " + this.config.dir, e);
         }
 
         // 内部组件
-        this.writer = new SpoolWriter(cfg, chronicleQueue);
-        this.reader = new SpoolReader(cfg, chronicleQueue);
+        this.writer = new SpoolWriter(this.config, chronicleQueue);
+        this.reader = new SpoolReader(this.config, chronicleQueue);
         this.writer.start();
         // cleanupIntervalMs=0 时默认跟滚动周期一致
-        long cleanupMs = cfg.cleanupIntervalMs > 0 ? cfg.cleanupIntervalMs : cfg.rollCycle.lengthInMillis();
-        this.timer = new SpoolTimer(writer, cfg.flushIntervalMs, reader, cleanupMs);
+        long cleanupMs = this.config.cleanupIntervalMs > 0
+                ? this.config.cleanupIntervalMs
+                : this.config.rollCycle.lengthInMillis();
+        this.timer = new SpoolTimer(writer, this.config.flushIntervalMs, reader, cleanupMs,
+                this, this.config.dirSizeRefreshIntervalMs);
+        // 启动时刷新一次目录占用（Timer 首跑有 delay）
+        refreshDiskUsage();
     }
 
     /**
@@ -112,12 +132,48 @@ public class Spool<T> implements Closeable {
      * <p>返回 true 仅代表已进入内存暂存队列，后台异步落盘，进程崩溃可能丢失暂存中的数据。</p>
      *
      * @param data 待缓冲的数据
-     * @return true 入暂存队列成功；false 暂存队列满且超时（或已关闭）
+     * @return true 入暂存队列成功；false 磁盘预算超限、暂存队列满且超时，或已关闭
      */
     public boolean append(T data) {
         if (closed) return false;
+        if (currentSizeBytes >= config.maxSizeBytes) {
+            log.warn("spool disk budget exceeded, append rejected: currentSizeBytes={}, maxSizeBytes={}, dir={}",
+                    currentSizeBytes, config.maxSizeBytes, dir);
+            return false;
+        }
         byte[] bytes = serializer.serialize(data);
         return writer.append(bytes);
+    }
+
+    /**
+     * 扫描队列目录，更新 {@link #currentSizeBytes}。
+     * <p>由定时任务与清理旧文件后调用；统计目录内数据文件总长度（忽略 {@code .spool.lock}）。</p>
+     */
+    public void refreshDiskUsage() {
+        long total = 0L;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
+            for (Path p : stream) {
+                String name = p.getFileName().toString();
+                if (LOCK_FILE.equals(name)) {
+                    continue;
+                }
+                if (!Files.isRegularFile(p)) {
+                    continue;
+                }
+                total += Files.size(p);
+            }
+        } catch (IOException e) {
+            log.warn("failed to refresh disk usage, dir={}", dir, e);
+            return;
+        }
+        currentSizeBytes = total;
+        log.debug("spool disk usage refreshed: currentSizeBytes={}, maxSizeBytes={}, dir={}",
+                currentSizeBytes, config.maxSizeBytes, dir);
+    }
+
+    /** 目录当前占用字节数（最近一次 {@link #refreshDiskUsage()} 的结果） */
+    public long getCurrentSizeBytes() {
+        return currentSizeBytes;
     }
 
     /**
@@ -210,16 +266,27 @@ public class Spool<T> implements Closeable {
     }
 
     public static class Builder<T> {
+        /** 数据类型 */
         private final Class<T> type;
+        /** 队列目录 */
         private final Path dir;
+        /** 序列化器，默认 JDK 原生 */
         private Serializer<T> serializer;
 
+        /** 磁盘预算上限（字节），默认 Long.MAX_VALUE=不限 */
         private long maxSizeBytes = SpoolConfig.DEFAULT_MAX_SIZE_BYTES;
+        /** 刷盘间隔（毫秒） */
         private long flushIntervalMs = SpoolConfig.DEFAULT_FLUSH_INTERVAL_MS;
+        /** 文件滚动周期 */
         private RollCycle rollCycle = SpoolConfig.DEFAULT_ROLL_CYCLE;
+        /** 清理旧文件间隔（毫秒），0=跟滚动周期一致 */
         private long cleanupIntervalMs = SpoolConfig.DEFAULT_CLEANUP_INTERVAL_MS;
+        /** 入暂存队列超时（毫秒） */
         private long offerTimeoutMs = SpoolConfig.DEFAULT_OFFER_TIMEOUT_MS;
+        /** 暂存队列容量（条数） */
         private int stagingCapacity = SpoolConfig.DEFAULT_STAGING_CAPACITY;
+        /** 定时刷新目录大小的间隔（毫秒） */
+        private long dirSizeRefreshIntervalMs = SpoolConfig.DEFAULT_DIR_SIZE_REFRESH_INTERVAL_MS;
 
         private Builder(Class<T> type, Path dir, Serializer<T> serializer) {
             this.type = Objects.requireNonNull(type, "type must not be null");
@@ -237,13 +304,22 @@ public class Spool<T> implements Closeable {
         }
 
        /**
-         * 磁盘预算上限。队列目录内所有数据文件总大小超过此值后 append 可能拒绝。
-         * 0 = 不限制（默认）。注意：这是包含已消费但尚未删除的历史文件的总磁盘占用，
-         * 不等于"未消费数据量"——Chronicle 按时间滚动文件，文件在 tailer 越过之前不会被删除。
+         * 磁盘预算上限（字节）。队列目录内数据文件总占用达到或超过此值后，{@link Spool#append}
+         * 拒绝入队并返回 false。默认 {@link Long#MAX_VALUE}（不限制）。
+         * 注意：这是包含已消费但尚未删除的历史文件的总磁盘占用，不等于"未消费数据量"。
          * @param maxSizeBytes 字节数，如 1024L*1024*1024 = 1GB
          */
         public Builder<T> maxSizeBytes(long maxSizeBytes) {
             this.maxSizeBytes = maxSizeBytes;
+            return this;
+        }
+
+        /**
+         * 定时刷新目录大小的间隔（毫秒）。后台 {@link SpoolTimer} 按此周期调用
+         * {@link Spool#refreshDiskUsage()}。默认 5000ms。
+         */
+        public Builder<T> dirSizeRefreshIntervalMs(long dirSizeRefreshIntervalMs) {
+            this.dirSizeRefreshIntervalMs = dirSizeRefreshIntervalMs;
             return this;
         }
 
@@ -318,7 +394,8 @@ public class Spool<T> implements Closeable {
 
         private SpoolConfig toConfig() {
             return new SpoolConfig(dir, maxSizeBytes, flushIntervalMs,
-                    rollCycle, cleanupIntervalMs, offerTimeoutMs, stagingCapacity);
+                    rollCycle, cleanupIntervalMs, offerTimeoutMs, stagingCapacity,
+                    dirSizeRefreshIntervalMs);
         }
     }
 
@@ -330,7 +407,9 @@ public class Spool<T> implements Closeable {
      */
     private static class MillisRollCycle implements RollCycle {
 
+        /** 委托索引/格式实现，仅替换滚动时长 */
         private final RollCycle base = TestRollCycles.TEST_SECONDLY;
+        /** 滚动间隔（毫秒） */
         private final int lengthInMillis;
 
         MillisRollCycle(int lengthInMillis) {

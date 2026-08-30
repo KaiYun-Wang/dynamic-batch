@@ -14,15 +14,19 @@
 
 - **写路径零锁**：生产者只入有界暂存队列（微秒级），后台单写线程串行落盘
 - **读路径单锁**：任意线程可并发 poll，锁内串行化共享 tailer，不重复不遗漏
-- **磁盘即容量**：消费暂停时数据堆积在磁盘，不占内存
+- **磁盘即容量**：消费暂停时数据堆积在磁盘，不占内存；可用 `maxSizeBytes` 限制目录占用
 - **可独立复用**：模块零 Spring 依赖，可整体拷到其他项目当缓冲池
 
 ## 工作原理
 
 ### 写路径
 
-`append(T)` 序列化后进入有界暂存队列（`LinkedBlockingQueue`），返回 true 仅代表**已进入内存暂存队列**。
+`append(T)` 先看磁盘预算缓存：`currentSizeBytes >= maxSizeBytes` 则直接返回 false；
+再序列化并进入有界暂存队列（`LinkedBlockingQueue`）。返回 true 仅代表**已进入内存暂存队列**。
 后台单写线程批量取出（最多 128 条/批）写入 Chronicle-Queue（mmap 追加写，顺序 IO 高效）。
+
+目录占用由 `refreshDiskUsage()` 扫盘更新：启动时一次、`dirSizeRefreshIntervalMs` 定时刷新、
+清理旧文件后也会刷新。Chronicle 按块预留（常见约 80MB/块），空队列也可能已有较大占用。
 
 ### 读路径
 
@@ -40,7 +44,7 @@
 
 `SpoolTimer` 后台线程定期（默认 = 滚动周期，可用 `cleanupIntervalMs()` 单独指定）调用清理逻辑：
 以 tailer 当前正在读的文件（`tailer.currentFile()`）为界，**文件名比它小的（时间更早）都已读完，删除**，
-遇到当前文件即停止。纯字符串比较，不解析时间、不涉及时区。
+遇到当前文件即停止。纯字符串比较，不解析时间、不涉及时区。删完后会再刷一次目录占用。
 
 ### 目录独占锁
 
@@ -68,18 +72,23 @@ public class DeviceDTO implements java.io.Serializable {
 
 // 2. 构造 Spool（不用传序列化器，默认 JDK 原生）
 Spool<DeviceDTO> spool = Spool.builder(DeviceDTO.class, "/data/spool-device")
-        .stagingCapacity(10000)      // 暂存队列容量（条数）
-        .flushIntervalMs(5000)       // 刷盘间隔：断电最多丢 5 秒数据
-        .rollCycleMillis(30_000)     // 30 秒滚一个文件（或 .rollCycle(RollCycles.FIVE_MINUTELY)）
-        .offerTimeoutMs(100)         // 暂存队列满时最多等 100ms
-        .cleanupIntervalMs(60_000)   // 每 60 秒清理一次已消费的旧文件
+        .stagingCapacity(10000)           // 暂存队列容量（条数）
+        .flushIntervalMs(5000)            // 刷盘间隔：断电最多丢 5 秒数据
+        .rollCycleMillis(30_000)          // 30 秒滚一个文件（或 .rollCycle(RollCycles.FIVE_MINUTELY)）
+        .offerTimeoutMs(100)              // 暂存队列满时最多等 100ms
+        .cleanupIntervalMs(60_000)        // 每 60 秒清理一次已消费的旧文件
+        .maxSizeBytes(1024L * 1024 * 1024) // 磁盘预算 1GB；默认 Long.MAX_VALUE=不限
+        .dirSizeRefreshIntervalMs(5000)   // 每 5 秒刷新目录大小（默认 5000）
         .build();
 
 // 3. 生产者（任意线程）
 boolean ok = spool.append(deviceDTO);
 if (!ok) {
-    // 降级：暂存队列满，丢弃并告警或转本地文件
+    // 降级：暂存队列满，或目录占用已达 maxSizeBytes
 }
+
+// 可选：查看最近一次刷新的目录占用（字节）
+long used = spool.getCurrentSizeBytes();
 
 // 4. 消费者：lockTimeoutMs=1000 是获取锁的最长等待
 //    有数据 → 返回对象；空队列 → 立即返回 null；锁超时 → 抛 TimeoutException
@@ -141,7 +150,10 @@ Spool<DeviceDTO> spool = Spool.builder(DeviceDTO.class, "/data/spool-device")
 | `flushIntervalMs` | 5000 | 刷盘间隔，断电丢失窗口 = 该值 |
 | `rollCycle` / `rollCycleMillis` | FIVE_MINUTELY | 文件滚动周期，可传 `RollCycles` 枚举或毫秒数 |
 | `cleanupIntervalMs` | 0（=滚动周期） | 清理已消费旧文件的间隔，滚动周期大时建议单独调小 |
-| `maxSizeBytes` | 0（不限） | 磁盘预算上限（预留，当前未强制） |
+| `maxSizeBytes` | Long.MAX_VALUE（不限） | 磁盘预算上限（字节）；目录占用 ≥ 上限时 append 返回 false |
+| `dirSizeRefreshIntervalMs` | 5000 | 定时刷新目录大小的间隔；清理旧文件后也会立刻刷新 |
+
+相关只读 API：`getCurrentSizeBytes()` 最近一次占用；需要时可手动 `refreshDiskUsage()`。
 
 ## 注意事项
 
@@ -172,3 +184,4 @@ Spool<DeviceDTO> spool = Spool.builder(DeviceDTO.class, "/data/spool-device")
 - **多线程并发 poll**：支持但**不保证单个消费者视角有序**；需要保序时用「单 reader 线程 + 线程池 worker」模式
 - **poll 出去的数据**：Spool 不追踪处理结果，下游拒绝时必须自行重试同一条，不能丢弃
 - **队列目录是内部文件**：`.cq4` 数据文件、`metadata.cq4t` 元数据，不要手动打开/修改/删除
+- **磁盘预算单位是字节**：含未 cleanup 的历史文件与 Chronicle 预留块；`append == false` 时区分不了「队列满」与「超预算」，需结合日志 / `getCurrentSizeBytes()` 判断

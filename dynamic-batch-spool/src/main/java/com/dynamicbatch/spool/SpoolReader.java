@@ -25,14 +25,15 @@ class SpoolReader implements Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(SpoolReader.class);
 
+    /** 串行化并发 poll 的非公平锁 */
     private final ReentrantLock lock = new ReentrantLock(false);
-    private final ExcerptTailer tailer;
-    private final ChronicleQueue chronicleQueue;
+    /** 构建期配置（只读） */
     private final SpoolConfig config;
+    /** 命名 tailer：读位置自动持久化，重启可续读 */
+    private final ExcerptTailer tailer;
 
     SpoolReader(SpoolConfig config, ChronicleQueue chronicleQueue) {
         this.config = config;
-        this.chronicleQueue = chronicleQueue;
         // 命名 tailer：Chronicle 自动持久化读位置到 metadata 文件
         this.tailer = chronicleQueue.createTailer("spool-tailer");
     }
