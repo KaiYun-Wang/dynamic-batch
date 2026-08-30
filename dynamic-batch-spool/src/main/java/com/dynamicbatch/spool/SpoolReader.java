@@ -32,11 +32,14 @@ class SpoolReader implements Closeable {
     private final ReentrantLock lock = new ReentrantLock(false);
     /** 构建期配置（只读） */
     private final SpoolConfig config;
+    /** Chronicle-Queue 实例（syncIndex 刷 metadata 用） */
+    private final ChronicleQueue chronicleQueue;
     /** 命名 tailer：读位置自动持久化，重启可续读 */
     private final ExcerptTailer tailer;
 
     SpoolReader(SpoolConfig config, ChronicleQueue chronicleQueue) {
         this.config = config;
+        this.chronicleQueue = chronicleQueue;
         // 命名 tailer：Chronicle 自动持久化读位置到 metadata 文件
         this.tailer = chronicleQueue.createTailer("spool-tailer");
     }
