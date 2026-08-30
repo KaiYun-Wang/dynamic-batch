@@ -1,8 +1,11 @@
 package com.dynamicbatch.spool;
 
 import net.openhft.chronicle.bytes.Bytes;
+import net.openhft.chronicle.bytes.MappedBytes;
+import net.openhft.chronicle.bytes.MappedBytesStore;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,7 +76,30 @@ class SpoolReader implements Closeable {
 
     @Override
     public void close() {
+        // 关闭前把 index 刷下去
+        syncIndex();
         log.info("spool reader closed");
+    }
+
+    /**
+     * 将命名 tailer 的读位置（index）强制刷到磁盘。
+     * <p>Chronicle 命名 tailer 的 index 存储在 {@code metadata.cq4t} 文件（TableStore）的 mmap 区域，
+     * 默认靠 OS 异步刷盘（最长 ~30 秒）。主动调用此方法可将脏页立即刷下去，
+     * 把进程崩溃时的重复消费范围从 OS 默认值降到 sync 间隔。</p>
+     * <p>{@link SpoolTimer} 定期调用此方法，和数据 sync 保持同一节奏。</p>
+     */
+    void syncIndex() {
+        // 走 Chronicle 自己的 MappedBytesStore.syncUpTo() 刷 metadata 文件
+        try {
+            SingleChronicleQueue scq = (SingleChronicleQueue) chronicleQueue;
+            MappedBytes mb = scq.metaStore().bytes();
+            if (mb.bytesStore() instanceof MappedBytesStore) {
+                ((MappedBytesStore) mb.bytesStore()).syncUpTo(mb.writePosition());
+            }
+            mb.releaseLast();
+        } catch (Exception e) {
+            log.warn("sync metadata failed", e);
+        }
     }
 
     /**

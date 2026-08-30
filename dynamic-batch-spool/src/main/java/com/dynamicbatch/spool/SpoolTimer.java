@@ -9,62 +9,56 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Spool 定时任务：定期刷盘（sync）、清理旧文件、刷新目录占用。
- * <p>自身不持有数据，只引用 {@link SpoolWriter} / {@link SpoolReader} / {@link Spool}
- * 并定期调用其方法。使用单线程调度器。</p>
- *
- * <p>offset 持久化由 Chronicle 命名 tailer 自动完成，不在此处理。</p>
+ * Spool 定时任务：定期刷盘（sync），让后台线程承担定时工作。
+ * <p>自身不持有数据，只引用 {@link SpoolWriter} 和 {@link SpoolReader} 并定期 sync。
+ * 使用单线程调度器，sync 是轻量操作（只刷当前 mmap 文件脏页），不会阻塞数据读写。</p>
  */
 class SpoolTimer implements Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(SpoolTimer.class);
 
-    /** 单线程调度器：刷盘、清理、刷新占用 */
     private final ScheduledExecutorService scheduler;
 
     SpoolTimer(SpoolWriter writer, long flushIntervalMs,
-               SpoolReader reader, long cleanupIntervalMs,
-               Spool<?> spool, long dirSizeRefreshIntervalMs) {
+               SpoolReader reader, long cleanupIntervalMs) {
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "spool-timer");
             t.setDaemon(true);
             return t;
         });
 
-        // 定时刷盘
+        // 定时刷盘：数据 + offset 一起刷，保持同一节奏
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 writer.sync();
             } catch (Exception e) {
                 log.error("spool timer sync error", e);
             }
+            try {
+                reader.syncIndex();
+            } catch (Exception e) {
+                log.error("spool timer syncIndex error", e);
+            }
         }, flushIntervalMs, flushIntervalMs, TimeUnit.MILLISECONDS);
 
-        // 定时清理已消费的旧 cycle 文件，删完后刷新目录占用
+        // 定时清理已消费的旧 cycle 文件
         if (cleanupIntervalMs > 0) {
             scheduler.scheduleAtFixedRate(() -> {
                 try {
                     reader.deleteConsumedCycles();
-                    spool.refreshDiskUsage();
                 } catch (Exception e) {
                     log.error("spool timer cleanup error", e);
                 }
             }, cleanupIntervalMs, cleanupIntervalMs, TimeUnit.MILLISECONDS);
         }
 
-        // 定时刷新目录大小
-        if (dirSizeRefreshIntervalMs > 0) {
-            scheduler.scheduleAtFixedRate(() -> {
-                try {
-                    spool.refreshDiskUsage();
-                } catch (Exception e) {
-                    log.error("spool timer dir size refresh error", e);
-                }
-            }, dirSizeRefreshIntervalMs, dirSizeRefreshIntervalMs, TimeUnit.MILLISECONDS);
-        }
+        log.debug("spool timer started, flushIntervalMs={}, cleanupIntervalMs={}",
+                flushIntervalMs, cleanupIntervalMs);
+    }
 
-        log.debug("spool timer started, flushIntervalMs={}, cleanupIntervalMs={}, dirSizeRefreshIntervalMs={}",
-                flushIntervalMs, cleanupIntervalMs, dirSizeRefreshIntervalMs);
+    /** 兼容旧构造器（无清理），不单独启动 schedule */
+    SpoolTimer(SpoolWriter writer, long flushIntervalMs) {
+        this(writer, flushIntervalMs, null, 0);
     }
 
     @Override

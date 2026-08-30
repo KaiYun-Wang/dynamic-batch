@@ -1,15 +1,31 @@
 # dynamic-batch-spool
 
-磁盘级 FIFO 缓冲队列（Spool）：基于 [Chronicle-Queue](https://github.com/OpenHFT/Chronicle-Queue) 的薄封装。
-数据先落盘再消费，内存有界、磁盘即容量——给"上游突发写入、下游消费跟不上"的场景做缓冲蓄水池。
+磁盘级 FIFO 缓冲队列（Spool）：基于 [Chronicle-Queue](https://github.com/OpenHFT/Chronicle-Queue) 构建，
+解决了原生 Chronicle-Queue 在多线程场景下的三个核心痛点。
+
+> Chronicle-Queue 的**单个 Appender / Tailer 实例是线程不安全的**（`@SingleThreaded`），原生要求每个线程持有独立实例；若要共享实例，需使用者自行加锁。且不提供已消费文件的自动清理、不提供写缓冲，数据持久化完全依赖操作系统默认的异步刷盘周期（最长 ~30 秒）。
+>
+> Spool 在此之上封装了**并发安全**、**自动清理**、**持久化窗口收窄**，让 Chronicle-Queue 可以开箱即用于多线程生产-消费场景。
+
+## 对比原生 Chronicle-Queue
+
+| 能力 | 原生 Chronicle-Queue | Spool |
+|------|---------------------|-------|
+| **并发安全** | Appender/Tailer 均线程不安全（`@SingleThreaded`） | 任意线程可并发 append/poll，零锁入队、锁内串行读 |
+| **数据持久化** | mmap 写入后依赖 OS 异步回写（page cache，最长 ~30 秒） | 定时 sync 收窄丢失窗口到 `flushIntervalMs`（默认 5 秒） |
+| **读位置持久化** | 命名 tailer 持久化到 mmap，同样依赖 OS 回写 | 和数据 sync 同周期主动刷盘，重复消费窗口收窄到 `flushIntervalMs` |
+| **已消费文件清理** | 不提供自动删除 | 后台定时清理，tailer 读完即删，磁盘空间有界 |
+| **写缓冲** | appender.writeBytes() 直写 mmap，生产者阻塞 | 有界暂存队列承接突发写入，生产者微秒级返回 |
+| **多进程防护** | 无 | 目录独占锁，同目录第二个进程直接 fail fast |
 
 ## 核心作用
 
-```
-生产者 ──append──> 暂存队列(内存) ──单写线程──> Chronicle-Queue(mmap 落盘) ──poll──> 消费者
-                        │                            │                              │
-                    有界，满则等               按时间滚动文件                 读位置自动持久化
-                    崩溃会丢                 tailer 读完自动删旧文件
+```mermaid
+flowchart LR
+    P["生产者"] --> SQ["暂存队列（内存）"]
+    SQ --> WT["写线程"]
+    WT --> CQ["Chronicle-Queue（磁盘）"]
+    CQ -->|poll 锁内串行| C["消费者"]
 ```
 
 - **写路径零锁**：生产者只入有界暂存队列（微秒级），后台单写线程串行落盘
@@ -39,6 +55,22 @@
 
 按时间滚动（默认 `FIVE_MINUTELY` 5 分钟，可用 `rollCycleMillis()` 指定任意毫秒数）。
 每个周期一个独立 `.cq4` 文件，文件名 = 该周期起始时间的格式化字符串。
+
+### 持久化机制
+
+```
+append() → mmap 写入 page cache（内核管理, JVM 无关） → OS 内核线程异步刷盘（默认最长 ~30 秒）
+                                                                       ↑
+                                                              定时 sync 强制刷盘
+```
+
+Chronicle-Queue 使用内存映射文件（mmap），数据写入后首先到达**操作系统内核的 page cache**，然后由 OS 内核线程在后台异步回写到磁盘。这意味着：
+
+- **kill -9 不丢数据**：JVM 进程被杀，OS 仍然在运行，page cache 还在，数据最终会刷下去
+- **断电/OS 崩溃才会丢**：机房断电、系统蓝屏，page cache 里的数据还没到磁盘就没了
+- **OS 默认丢失窗口 ~30 秒**（`vm.dirty_expire_centisecs`），但 SSD 通常提前刷了
+
+Spool 的定时 sync 把这个窗口从 ~30 秒收窄到 `flushIntervalMs`（默认 5 秒），同时**读位置（offset）也在同一周期 sync**，数据丢失和重复消费的范围保持一致。
 
 ### 文件删除
 
@@ -147,7 +179,7 @@ Spool<DeviceDTO> spool = Spool.builder(DeviceDTO.class, "/data/spool-device")
 | `serializer` | JDK 原生 | 序列化器，不传默认 JDK（对象需 Serializable），可用 `.serializer()` 换 JSON/Kryo 等 |
 | `stagingCapacity` | 10000 | 暂存队列容量（条数），满则 append 阻塞等待 |
 | `offerTimeoutMs` | 100 | 暂存队列满时 append 最多等多久，超时返回 false |
-| `flushIntervalMs` | 5000 | 刷盘间隔，断电丢失窗口 = 该值 |
+| `flushIntervalMs` | 5000 | 刷盘间隔。数据文件 + 读位置（offset）一并 sync，断电丢失窗口 / 重复消费窗口均 = 该值 |
 | `rollCycle` / `rollCycleMillis` | FIVE_MINUTELY | 文件滚动周期，可传 `RollCycles` 枚举或毫秒数 |
 | `cleanupIntervalMs` | 0（=滚动周期） | 清理已消费旧文件的间隔，滚动周期大时建议单独调小 |
 | `maxSizeBytes` | Long.MAX_VALUE（不限） | 磁盘预算上限（字节）；目录占用 ≥ 上限时 append 返回 false |
@@ -163,7 +195,7 @@ Spool<DeviceDTO> spool = Spool.builder(DeviceDTO.class, "/data/spool-device")
 |------|---------|------|
 | **暂存队列（内存）** | 写线程未取走的数据（≤ stagingCapacity 条） | **真丢**：append 返回 true ≠ 已持久化 |
 | **未 sync 的 mmap 脏页** | 最后 flushIntervalMs 内的写入 | **真丢**（仅断电/OS 崩溃；kill -9 时 OS 仍在，page cache 通常能回写） |
-| **读位置（offset）** | 最近少量已读记录 | **不丢**：重启后从断点续读，可能**重复消费**最近几条，消费端需幂等兜底 |
+| **读位置（offset）** | 最后 flushIntervalMs 内的已读记录 | **不丢**：重启后从断点续读，可能**重复消费**最近几条。offset 随数据一起定时 sync，重复窗口与数据丢失窗口一致 |
 | **已 poll 未处理完** | poll 即交付 | **真丢**：读位置已推进，重启后跳过不补发。接受的设计取舍，处理失败需调用方自行重试 |
 
 一句话：**内存丢数据、断电丢磁盘数据、offset 回退只产生重复消费**。
