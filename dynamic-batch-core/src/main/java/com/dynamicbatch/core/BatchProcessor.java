@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -50,10 +51,15 @@ public class BatchProcessor {
      *
      * <p>同一 routingKey 的数据永远进入同一分区，分区内严格有序（FIFO + 单线程消费）。
      *
+     * @param groupKey   组 key，不可为 null
+     * @param routingKey 业务 key（路由依据），不可为 null
      * @return true 入队成功；false 队列满且超时（或组不存在、组已关闭）
+     * @throws NullPointerException groupKey 或 routingKey 为 null
      */
     @SuppressWarnings("unchecked")
     public <T> boolean submit(String groupKey, String routingKey, T data) {
+        Objects.requireNonNull(groupKey, "groupKey must not be null");
+        Objects.requireNonNull(routingKey, "routingKey must not be null");
         BatchWorkerGroup<T> group = (BatchWorkerGroup<T>) groupMap.get(groupKey);
         if (group == null) {
             log.error("worker group not found: key={}", groupKey);

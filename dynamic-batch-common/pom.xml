@@ -43,5 +43,18 @@
             <artifactId>junit</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- 序列化兼容矩阵测试用（SpoolEntryPOJOSerializationTest）：验证条目可被常见框架直接编解码 -->
+        <dependency>
+            <groupId>com.esotericsoftware</groupId>
+            <artifactId>kryo</artifactId>
+            <version>5.5.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.msgpack</groupId>
+            <artifactId>jackson-dataformat-msgpack</artifactId>
+            <version>0.9.5</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>

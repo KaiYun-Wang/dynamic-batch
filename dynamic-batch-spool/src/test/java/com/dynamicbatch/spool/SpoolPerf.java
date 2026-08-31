@@ -12,12 +12,13 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Spool 性能测试（main 方法手动执行，不进 CI）。
- * <p>测试：纯写吞吐、纯读吞吐、并发读写吞吐。</p>
+ * Spool 性能压测（main 方法手动执行，不进 CI；类名不带 Test 后缀，避免被 surefire 扫描）。
+ * <p>测试：纯写吞吐、纯读吞吐。</p>
+ * <p>历史结论（供参考）：大消息 ops/s 下降主因是磁盘带宽而非文件扩容。</p>
  */
-public class SpoolPerfTest {
+public class SpoolPerf {
 
-    private static final Logger log = LoggerFactory.getLogger(SpoolPerfTest.class);
+    private static final Logger log = LoggerFactory.getLogger(SpoolPerf.class);
 
     private static final int RECORDS = 200_000;
     private static final int STAGING_CAPACITY = 50000;

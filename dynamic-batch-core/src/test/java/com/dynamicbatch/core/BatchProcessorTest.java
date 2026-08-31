@@ -10,8 +10,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 import static org.junit.Assert.assertEquals;
@@ -239,40 +237,29 @@ public class BatchProcessorTest {
     }
 
     @Test
-    public void nullRoutingKeyFallsBackToPartitionZero() throws Exception {
+    public void nullGroupKeyShouldThrow() {
         processor = new BatchProcessor();
-        Set<String> flushThreads = ConcurrentHashMap.newKeySet();
-        AtomicInteger flushed = new AtomicInteger();
-
-        processor.registerGroup("null-key",
-                BatchWorkerGroup.builder(Integer.class, batch -> {
-                    flushThreads.add(Thread.currentThread().getName());
-                    flushed.addAndGet(batch.size());
-                })
-                        .queueCapacity(100)
-                        .batchSize(10)
-                        .maxWaitMs(50)
-                        .partitionCount(3)
-                        .build());
-
-        for (int i = 0; i < 30; i++) {
-            assertTrue(processor.submit("null-key", null, i));
+        // groupKey 不可为 null：ConcurrentHashMap.get(null) 本身会抛无名 NPE，
+        // 入口 requireNonNull 给出可读 message，fail fast 在调用现场
+        try {
+            processor.submit(null, "r1", "data");
+            fail("expected NullPointerException");
+        } catch (NullPointerException ex) {
+            assertTrue(ex.getMessage().contains("groupKey must not be null"));
         }
-        // 等全部消费完再关闭：shutdown 的剩余刷盘在调用线程执行，会把 main 混入 flush 线程集合
-        waitUntil(() -> flushed.get() >= 30, 3000);
-        processor.shutdown();
-        processor = null;
-
-        assertEquals(30, flushed.get());
-        // null routingKey 固定路由到分区 0，flush 只来自分区 0 的消费线程
-        assertEquals("null routing key should pin to partition 0", 1, flushThreads.size());
-        assertTrue(flushThreads.iterator().next().endsWith("-0"));
     }
 
-    private static void waitUntil(BooleanSupplier condition, long timeoutMs) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(20);
+    @Test
+    public void nullRoutingKeyShouldThrow() {
+        processor = new BatchProcessor();
+        // routingKey 不可为 null：null 无法取模路由（null.hashCode() NPE），
+        // Processor 是真正入口，在此 fail fast。原"null → 分区 0"语义已废除，
+        // 无键提交场景由 Processor 后续的随机键重载承担（不传 routingKey，内部生成）
+        try {
+            processor.submit("any-group", null, "data");
+            fail("expected NullPointerException");
+        } catch (NullPointerException ex) {
+            assertTrue(ex.getMessage().contains("routingKey must not be null"));
         }
     }
 }
