@@ -6,10 +6,12 @@ import org.slf4j.LoggerFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 
 /**
  * Spool 性能压测（main 方法手动执行，不进 CI；类名不带 Test 后缀，避免被 surefire 扫描）。
@@ -38,33 +40,52 @@ public class SpoolPerf {
 
     public static void main(String[] args) throws Exception {
         Path dir = Files.createTempDirectory("spool-perf-");
+        try {
+            System.out.println("=== Spool 性能测试 ===");
+            System.out.printf("记录数: %d, 暂存容量: %d, 生产者线程: %d%n",
+                    RECORDS, STAGING_CAPACITY, PRODUCER_THREADS);
 
-        System.out.println("=== Spool 性能测试 ===");
-        System.out.printf("记录数: %d, 暂存容量: %d, 生产者线程: %d%n",
-                RECORDS, STAGING_CAPACITY, PRODUCER_THREADS);
+            // 小消息 256B
+            byte[] smallPayload = new byte[256];
+            for (int i = 0; i < smallPayload.length; i++) {
+                smallPayload[i] = (byte) ('A' + (i % 26));
+            }
+            runTest(dir.resolve("small"), smallPayload, "小消息(256B)");
 
-        // 小消息 256B
-        byte[] smallPayload = new byte[256];
-        for (int i = 0; i < smallPayload.length; i++) {
-            smallPayload[i] = (byte) ('A' + (i % 26));
+            // 中消息 4KB
+            byte[] mediumPayload = new byte[4096];
+            for (int i = 0; i < mediumPayload.length; i++) {
+                mediumPayload[i] = (byte) ('A' + (i % 26));
+            }
+            runTest(dir.resolve("medium"), mediumPayload, "中消息(4KB)");
+
+            // 大消息 64KB
+            byte[] largePayload = new byte[65536];
+            for (int i = 0; i < largePayload.length; i++) {
+                largePayload[i] = (byte) ('A' + (i % 26));
+            }
+            runTest(dir.resolve("large"), largePayload, "大消息(64KB)");
+
+            System.out.println("=== 性能测试完成 ===");
+        } finally {
+            cleanup(dir);
         }
-        runTest(dir.resolve("small"), smallPayload, "小消息(256B)");
+    }
 
-        // 中消息 4KB
-        byte[] mediumPayload = new byte[4096];
-        for (int i = 0; i < mediumPayload.length; i++) {
-            mediumPayload[i] = (byte) ('A' + (i % 26));
+    /** 删除压测临时目录，避免十几 GB 数据残留占满系统盘 */
+    private static void cleanup(Path dir) {
+        try (Stream<Path> walk = Files.walk(dir)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.delete(p);
+                } catch (Exception e) {
+                    System.err.println("删除失败: " + p + " — " + e.getMessage());
+                }
+            });
+            System.out.println("已清理压测临时目录: " + dir);
+        } catch (Exception e) {
+            System.err.println("清理压测临时目录失败: " + dir + " — " + e.getMessage());
         }
-        runTest(dir.resolve("medium"), mediumPayload, "中消息(4KB)");
-
-        // 大消息 64KB
-        byte[] largePayload = new byte[65536];
-        for (int i = 0; i < largePayload.length; i++) {
-            largePayload[i] = (byte) ('A' + (i % 26));
-        }
-        runTest(dir.resolve("large"), largePayload, "大消息(64KB)");
-
-        System.out.println("=== 性能测试完成 ===");
     }
 
     private static void runTest(Path dir, byte[] payload, String label) throws Exception {
@@ -74,6 +95,15 @@ public class SpoolPerf {
                 .offerTimeoutMs(100)
                 .build();
 
+        try {
+            runStress(spool, payload, label);
+        } finally {
+            spool.close();
+        }
+        System.out.printf("[%s] 完成%n", label);
+    }
+
+    private static void runStress(Spool<byte[]> spool, byte[] payload, String label) throws Exception {
         // 纯写测试
         AtomicLong writeNanos = new AtomicLong();
         CountDownLatch writeLatch = new CountDownLatch(PRODUCER_THREADS);
@@ -130,8 +160,5 @@ public class SpoolPerf {
         long readTimeMs = readNanos.get() / 1_000_000;
         double readOps = (double) readCount[0] / readTimeMs * 1000;
         System.out.printf("[%s] 纯读: %dms, %,.0f ops/s%n", label, readTimeMs, readOps);
-
-        spool.close();
-        System.out.printf("[%s] 完成%n", label);
     }
 }

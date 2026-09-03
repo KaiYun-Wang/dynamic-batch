@@ -1,8 +1,12 @@
 package com.dynamicbatch.core;
 
+import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import org.junit.After;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -22,7 +26,15 @@ import static org.junit.Assert.fail;
  */
 public class BatchProcessorTest {
 
+    @Rule
+    public TemporaryFolder temp = new TemporaryFolder();
+
     private BatchProcessor processor;
+
+    /** 组级测试辅助：每组独占 Spool 目录（同 JVM 同目录 = 目录锁冲突 fail fast） */
+    private static SpoolConfigPOJO spoolConfig(File dir) {
+        return SpoolConfigPOJO.builder(dir.getAbsolutePath()).build();
+    }
 
     @After
     public void tearDown() {
@@ -43,7 +55,9 @@ public class BatchProcessorTest {
         };
         // batchSize=3 凑满即 flush；maxWaitMs 只是攒批窗口，与关闭耗时无关
         processor.registerGroup("demo",
-                BatchWorkerGroup.builder(String.class, handler)
+                BatchWorkerGroup.builder(String.class,
+                        spoolConfig(new File(temp.getRoot(), "flush-batch")),
+                        handler)
                         .queueCapacity(100)
                         .batchSize(3)
                         .maxWaitMs(2000)
@@ -66,7 +80,9 @@ public class BatchProcessorTest {
         // maxWaitMs 故意给大值（模拟长时间攒批场景）：验证关闭耗时与其无关，
         // 消费线程每 WAKEUP_INTERVAL_MS 醒来检查一次停止信号，剩余数据由 shutdown 直接刷盘
         processor.registerGroup("remain",
-                BatchWorkerGroup.builder(Integer.class, handler)
+                BatchWorkerGroup.builder(Integer.class,
+                        spoolConfig(new File(temp.getRoot(), "remain")),
+                        handler)
                         .queueCapacity(100)
                         .batchSize(100)
                         .maxWaitMs(60_000)
@@ -75,6 +91,12 @@ public class BatchProcessorTest {
 
         assertTrue(processor.submit("remain", "r1", 1));
         assertTrue(processor.submit("remain", "r1", 2));
+        // 新链路数据先落 Spool 由 Dispatcher 异步搬运：必须等消化完再关，
+        // 否则 shutdown 时数据还在磁盘上未被消费，flushed 为 0
+        long deadline = System.currentTimeMillis() + 3000;
+        while (flushed.size() < 2 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
         processor.shutdown();
         processor = null;
 
@@ -85,8 +107,10 @@ public class BatchProcessorTest {
     public void submitShouldRejectWrongType() throws Exception {
         processor = new BatchProcessor();
         processor.registerGroup("typed",
-                BatchWorkerGroup.builder(String.class, batch -> {
-                })
+                BatchWorkerGroup.builder(String.class,
+                        spoolConfig(new File(temp.getRoot(), "typed")),
+                        batch -> {
+                        })
                         .batchSize(10)
                         .build());
 
@@ -112,10 +136,12 @@ public class BatchProcessorTest {
 
         // 4 分区：同一 routingKey 永远路由到同一分区，flush 只来自该分区的单条消费线程
         processor.registerGroup("route",
-                BatchWorkerGroup.builder(Integer.class, batch -> {
-                    flushThreads.add(Thread.currentThread().getName());
-                    flushed.addAll(batch);
-                })
+                BatchWorkerGroup.builder(Integer.class,
+                        spoolConfig(new File(temp.getRoot(), "route")),
+                        batch -> {
+                            flushThreads.add(Thread.currentThread().getName());
+                            flushed.addAll(batch);
+                        })
                         .queueCapacity(2000)
                         .batchSize(500)
                         .maxWaitMs(50)
@@ -147,7 +173,9 @@ public class BatchProcessorTest {
         // batchSize=1：每条数据独立 flush，出队顺序 = flush 顺序；
         // 分区单线程 + FIFO → 同 routingKey 的数据严格按提交顺序输出
         processor.registerGroup("order",
-                BatchWorkerGroup.builder(String.class, flushed::addAll)
+                BatchWorkerGroup.builder(String.class,
+                        spoolConfig(new File(temp.getRoot(), "order")),
+                        flushed::addAll)
                         .queueCapacity(2000)
                         .batchSize(1)
                         .maxWaitMs(50)
@@ -191,14 +219,19 @@ public class BatchProcessorTest {
     @Test
     public void registerDuplicateGroupShouldThrow() {
         processor = new BatchProcessor();
-        BatchWorkerGroup<String> first = BatchWorkerGroup.builder(String.class, batch -> {
-        }).build();
+        BatchWorkerGroup<String> first = BatchWorkerGroup.builder(String.class,
+                spoolConfig(new File(temp.getRoot(), "dup-first")),
+                batch -> {
+                }).build();
         processor.registerGroup("same", first);
 
-        // 同 key 重复注册：启动期配置错误，快速失败；旧组保持运行不受影响
+        // 同 key 重复注册：启动期配置错误，快速失败；旧组保持运行不受影响。
+        // 第二组 build 零磁盘资源（Spool 在 start 期才构建），注册失败后无需清理
         try {
-            processor.registerGroup("same", BatchWorkerGroup.builder(String.class, batch -> {
-            }).build());
+            processor.registerGroup("same", BatchWorkerGroup.builder(String.class,
+                    spoolConfig(new File(temp.getRoot(), "dup-second")),
+                    batch -> {
+                    }).build());
             fail("expected IllegalStateException");
         } catch (IllegalStateException ex) {
             assertTrue(ex.getMessage().contains("already registered"));
@@ -209,8 +242,10 @@ public class BatchProcessorTest {
     @Test
     public void registerGroupShouldRejectInvalidGroupKey() {
         processor = new BatchProcessor();
-        BatchWorkerGroup<String> group = BatchWorkerGroup.builder(String.class, batch -> {
-        }).build();
+        BatchWorkerGroup<String> group = BatchWorkerGroup.builder(String.class,
+                spoolConfig(new File(temp.getRoot(), "invalid-key")),
+                batch -> {
+                }).build();
 
         try {
             processor.registerGroup("DemoItem:insert", group);
@@ -231,9 +266,11 @@ public class BatchProcessorTest {
 
     @Test(expected = IllegalArgumentException.class)
     public void partitionCountShouldRejectInvalid() {
-        // 分区数必须 > 0
-        BatchWorkerGroup.builder(String.class, batch -> {
-        }).partitionCount(0).build();
+        // 分区数必须 > 0；build() 仅做配置校验（partitionCount 在最前，Spool 未创建零资源）
+        BatchWorkerGroup.builder(String.class,
+                spoolConfig(new File(temp.getRoot(), "invalid-partition")),
+                batch -> {
+                }).partitionCount(0).build();
     }
 
     @Test

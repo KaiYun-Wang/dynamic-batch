@@ -2,6 +2,7 @@ package com.dynamicbatch.example.controller;
 
 import com.dynamicbatch.core.BatchProcessor;
 import com.dynamicbatch.core.BatchWorkerGroup;
+import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -10,6 +11,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.annotation.PostConstruct;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * 分区演示入口：启动时注册一个 3 分区的 Worker 组。
@@ -17,6 +20,9 @@ import javax.annotation.PostConstruct;
  * <pre>
  * # 提交单条
  * curl "http://localhost:8080/test-batch/submit?n=42"
+ *
+ * # 批量投递：data 为 "1".."count"，routingKey 同 data（哈希散到各分区并行消费）
+ * curl "http://localhost:8080/test-batch/batch-submit?count=1000"
  * </pre>
  */
 @RestController
@@ -37,13 +43,9 @@ public class BatchTestController {
     public void registerDemoGroup() {
         try {
             batchProcessor.registerGroup(GROUP_KEY,
-                    BatchWorkerGroup.builder(String.class, batch -> {
-                        String first = batch.get(0);
-                        String last = batch.get(batch.size() - 1);
-                        log.info("flushed size={}, range=[{}..{}], thread={}",
-                                batch.size(), first, last,
-                                Thread.currentThread().getName());
-                    })
+                    BatchWorkerGroup.builder(String.class,
+                            SpoolConfigPOJO.builder("spool-demo-partition").build(),
+                            batch -> log.info("flushed {} items: {}", batch.size(), batch))
                             .queueCapacity(200)
                             .batchSize(5)
                             .maxWaitMs(2000)
@@ -61,5 +63,34 @@ public class BatchTestController {
         String data = String.valueOf(n);
         boolean ok = batchProcessor.submit(GROUP_KEY, data, data);
         return (ok ? "ok" : "fail") + ": " + data;
+    }
+
+    /**
+     * 批量投递演示：投递 count 条，data 为 "1".."count"，routingKey 同 data。
+     * submit 仅写 Spool（磁盘缓冲）即返回，消费由分发线程异步进行；
+     * count 上限 10 万，防止误操作打爆磁盘预算。
+     */
+    @GetMapping("/batch-submit")
+    public Map<String, Object> batchSubmit(@RequestParam int count) {
+        if (count <= 0 || count > 100_000) {
+            throw new IllegalArgumentException("count must be in (0, 100000], got " + count);
+        }
+        long start = System.currentTimeMillis();
+        int accepted = 0;
+        for (int i = 1; i <= count; i++) {
+            String data = String.valueOf(i);
+            if (batchProcessor.submit(GROUP_KEY, data, data)) {
+                accepted++;
+            }
+        }
+        long costMs = System.currentTimeMillis() - start;
+        log.info("batch submit done: total={}, accepted={}, costMs={}", count, accepted, costMs);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("total", count);
+        result.put("accepted", accepted);
+        result.put("rejected", count - accepted);
+        result.put("costMs", costMs);
+        return result;
     }
 }

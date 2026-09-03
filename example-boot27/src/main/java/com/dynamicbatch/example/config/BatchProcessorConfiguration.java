@@ -2,12 +2,14 @@ package com.dynamicbatch.example.config;
 
 import com.dynamicbatch.core.BatchProcessor;
 import com.dynamicbatch.core.BatchWorkerGroup;
+import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.springframework.context.annotation.Configuration;
 
 import javax.annotation.PostConstruct;
+import java.io.Serializable;
 
 /**
  * 对齐 yikekong 的 BatchWriterConfiguration：
@@ -30,7 +32,9 @@ public class BatchProcessorConfiguration {
     @PostConstruct
     public void registerWriters() {
         batchProcessor.registerGroup(DEMO_INSERT,
-                BatchWorkerGroup.builder(DemoItem.class, batch -> log.info("demo insert flush ok, size={}, first={}", batch.size(), batch.get(0)))
+                BatchWorkerGroup.builder(DemoItem.class,
+                                spoolConfig("spool-demo-insert"),
+                                batch -> log.info("demo insert flush ok, size={}, first={}", batch.size(), batch.get(0)))
                         .queueCapacity(100)
                         .batchSize(5)
                         .maxWaitMs(2000)
@@ -39,7 +43,9 @@ public class BatchProcessorConfiguration {
                         .build()
         );
         batchProcessor.registerGroup(DEMO_UPDATE,
-                BatchWorkerGroup.builder(DemoItem.class, batch -> log.info("demo update flush ok, size={}, first={}", batch.size(), batch.get(0)))
+                BatchWorkerGroup.builder(DemoItem.class,
+                                spoolConfig("spool-demo-update"),
+                                batch -> log.info("demo update flush ok, size={}, first={}", batch.size(), batch.get(0)))
                         .queueCapacity(256)
                         .batchSize(20)
                         .maxWaitMs(500)
@@ -51,8 +57,15 @@ public class BatchProcessorConfiguration {
         log.info("批处理注册完成: {}, {}", DEMO_INSERT, DEMO_UPDATE);
     }
 
-    /** 示例数据类型 */
-    public static class DemoItem {
+    /** 组级辅助：示例组的 Spool 目录配置（每目录只能被一个 Spool 独占，各组目录不可相同） */
+    private static SpoolConfigPOJO spoolConfig(String dir) {
+        return SpoolConfigPOJO.builder(dir).build();
+    }
+
+    /** 示例数据类型：默认 JDK 序列化要求 implements Serializable（build 期 L1 校验拦截） */
+    public static class DemoItem implements Serializable {
+        private static final long serialVersionUID = 1L;
+
         private final String id;
 
         public DemoItem(String id) {

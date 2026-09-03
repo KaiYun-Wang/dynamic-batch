@@ -30,10 +30,13 @@ public class BatchProcessor {
      * <p>同 key 重复注册视为配置错误，直接抛异常（启动期 fail fast），
      * 不静默替换；putIfAbsent 原子保证并发注册安全，无需加锁。
      *
+     * <p>组启动（start）失败时先从注册表移除再原样上抛：避免「已注册但未启动」的
+     * 僵尸组占住 key（否则捕获异常重试 register 会误报 already registered）。
+     *
      * @param key   唯一标识，仅允许字母、数字、{@code -}、{@code _}，如 {@code device_dto_insert}
      * @param group 已构造好的 Worker 组（含分区数、队列参数与回调）
      * @throws IllegalArgumentException key 为空或不符合命名规则
-     * @throws IllegalStateException    key 已被注册
+     * @throws IllegalStateException    key 已被注册；或组启动失败（如 Spool 目录锁冲突）
      */
     public <T> void registerGroup(String key, BatchWorkerGroup<T> group) {
         validateGroupKey(key);
@@ -42,7 +45,12 @@ public class BatchProcessor {
             throw new IllegalStateException("worker group already registered: key=" + key);
         }
         group.setKey(key);
-        group.start();
+        try {
+            group.start();
+        } catch (RuntimeException e) {
+            groupMap.remove(key);
+            throw e;
+        }
         log.info("registered worker group: key={}, partitions={}", key, group.getPartitionCount());
     }
 
