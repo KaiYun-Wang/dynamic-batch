@@ -45,14 +45,17 @@ public class BatchWorkerGroup<T> {
     private String key;
     /** 数据类型，submit 时由分区 Worker 做运行时校验 */
     private final Class<T> type;
-    private final int partitionCount;
+    private final Consumer<List<T>> flushCallback;
+    private final Consumer<List<T>> failureHandler;
     /** 组共享配置：全部分区 Worker 持有同一实例 */
     private final BatchWorkerGroupConfigPOJO config;
 
-    /** 分区列表：序号即分区号，路由目标 */
+    /** 分区列表：序号即分区号，路由目标；分区数 = size() */
     private final List<BatchWorker<T>> partitions = new ArrayList<>();
 
     private volatile boolean running;
+    /** shutdown 入口置 true，resize 入口据此拒绝；与 resize 共用对象锁 */
+    private volatile boolean shuttingDown;
 
     /** 磁盘缓冲（削峰蓄水池），start() 时按 spoolConfig 构建；未 start 的组为 null */
     private Spool<SpoolEntryPOJO<T>> spool;
@@ -65,12 +68,13 @@ public class BatchWorkerGroup<T> {
 
     private BatchWorkerGroup(Builder<T> builder) {
         this.type = builder.type;
-        this.partitionCount = builder.partitionCount;
+        this.flushCallback = builder.flushCallback;
+        this.failureHandler = builder.failureHandler;
         this.config = builder.config;
         this.spoolConfig = builder.spoolConfig;
         // 共享同一 config 实例：分区 Worker 不复制配置，组级公共字段经此对象读取
-        for (int i = 0; i < partitionCount; i++) {
-            partitions.add(new BatchWorker<>(type, builder.flushCallback, builder.failureHandler, config));
+        for (int i = 0; i < builder.partitionCount; i++) {
+            partitions.add(new BatchWorker<>(type, flushCallback, failureHandler, config));
         }
     }
 
@@ -79,7 +83,7 @@ public class BatchWorkerGroup<T> {
     }
 
     public int getPartitionCount() {
-        return partitionCount;
+        return partitions.size();
     }
 
     /**
@@ -111,7 +115,7 @@ public class BatchWorkerGroup<T> {
         dispatcher.setName(key + "-dispatcher");
         dispatcher.start();
         log.info("[{}] worker group started, partitions={}, queueCapacity={}, batchSize={}, spoolDir={}",
-                key, partitionCount, config.getQueueCapacity(), config.getBatchSize(), spool.dir());
+                key, partitions.size(), config.getQueueCapacity(), config.getBatchSize(), spool.dir());
     }
 
     /**
@@ -205,7 +209,7 @@ public class BatchWorkerGroup<T> {
 
     /** 路由：hash 取模；routingKey 不可为 null（Processor 入口 requireNonNull + 落盘条目构造器 fail fast 兜底） */
     private int partitionIndex(String routingKey) {
-        return Math.floorMod(routingKey.hashCode(), partitionCount);
+        return Math.floorMod(routingKey.hashCode(), partitions.size());
     }
 
     /**
@@ -218,6 +222,7 @@ public class BatchWorkerGroup<T> {
      * 未启动的组无任何资源（spool/dispatcher 均为 null），直接返回。
      */
     public synchronized void shutdown() {
+        shuttingDown = true;
         if (!running) {
             return;
         }
@@ -307,6 +312,93 @@ public class BatchWorkerGroup<T> {
         dispatcher.requestRun();
         awaitPhase(dispatcher::getPausePhase, PausePhase.RUNNING, deadline, "dispatcher");
         log.info("[{}] worker group resumed", key);
+    }
+
+    // ======================== 热更新 resize ========================
+
+    /**
+     * 运行时调整分区数（先 pauseAll，改 partitions，再 resumeAll）。
+     * 与 {@link #shutdown()} 互斥；newSize 与当前相同则幂等返回。
+     *
+     * @param newSize    目标分区数，必须 &gt;= 1
+     * @param timeoutMs  整段超时预算（毫秒，含暂停、改拓扑、恢复）
+     * @throws IllegalArgumentException newSize &lt; 1
+     * @throws IllegalStateException    组未启动，或正在 shutdown
+     * @throws TimeoutException         预算内未完成（已回滚）
+     */
+    synchronized void resize(int newSize, long timeoutMs) throws TimeoutException {
+        if (shuttingDown) {
+            throw new IllegalStateException("[" + key + "] resize rejected, group is shutting down");
+        }
+        if (!running) {
+            throw new IllegalStateException("[" + key + "] group not started");
+        }
+        if (newSize < 1) {
+            throw new IllegalArgumentException("newSize must be >= 1, got " + newSize);
+        }
+        int oldSize = partitions.size();
+        if (newSize == oldSize) {
+            return;
+        }
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        List<BatchWorker<T>> addedWorkers = new ArrayList<>();
+        // 缩容只摘除不 shutdown（此时整组已暂停，消费线程仍存活）：成功路径最后才关闭，
+        // 失败回滚直接回挂原实例——避免回滚时重启线程造成新旧消费线程并发执行回调
+        List<BatchWorker<T>> removedWorkers = new ArrayList<>();
+        try {
+            pauseAll(Math.max(0, deadline - System.currentTimeMillis()));
+            if (newSize > oldSize) {
+                for (int i = oldSize; i < newSize; i++) {
+                    BatchWorker<T> worker = new BatchWorker<>(type, flushCallback, failureHandler, config);
+                    worker.setName(key + "-" + i);
+                    addedWorkers.add(worker);
+                    partitions.add(worker);
+                }
+            } else {
+                // 头插保持原序号顺序，回滚时按序回挂即可还原拓扑
+                for (int i = oldSize - 1; i >= newSize; i--) {
+                    removedWorkers.add(0, partitions.remove(i));
+                }
+            }
+            for (BatchWorker<T> worker : addedWorkers) {
+                worker.start();
+            }
+            resumeAll(Math.max(0, deadline - System.currentTimeMillis()));
+            // resume 成功 resize 才算成功：此时才真正关闭缩容摘除的 Worker（已无路由可达）
+            for (BatchWorker<T> worker : removedWorkers) {
+                worker.shutdown();
+            }
+            log.info("[{}] resize complete, partitions {} -> {}", key, oldSize, newSize);
+        } catch (TimeoutException | RuntimeException e) {
+            rollbackResize(oldSize, addedWorkers, removedWorkers);
+            throw e;
+        }
+    }
+
+    /**
+     * resize 失败回滚：扩容移除新增 Worker；缩容把摘除的 Worker 按原序号回挂
+     * （摘除时未 shutdown，消费线程仍存活，回挂后即可恢复消费）。恢复各线程 RUNNING 意图，
+     * 不在此重试 resumeAll。
+     */
+    private void rollbackResize(int oldSize, List<BatchWorker<T>> addedWorkers,
+                                List<BatchWorker<T>> removedWorkers) {
+        for (BatchWorker<T> worker : addedWorkers) {
+            if (partitions.remove(worker)) {
+                worker.shutdown();
+            }
+        }
+        while (partitions.size() > oldSize) {
+            BatchWorker<T> tail = partitions.remove(partitions.size() - 1);
+            tail.shutdown();
+        }
+        for (BatchWorker<T> worker : removedWorkers) {
+            partitions.add(worker);
+        }
+        dispatcher.requestRun();
+        for (BatchWorker<T> worker : partitions) {
+            worker.requestRun();
+        }
+        log.warn("[{}] resize failed, rolled back to running, partitions={}", key, partitions.size());
     }
 
     /** 短轮询等待相位翻到期望值，超时抛 {@link TimeoutException} */

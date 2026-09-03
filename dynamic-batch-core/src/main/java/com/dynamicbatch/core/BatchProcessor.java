@@ -78,49 +78,23 @@ public class BatchProcessor {
     }
 
     /**
-     * 暂停指定 Worker 组：分发线程停止取数，各分区排空手头批次与队列残留后待命。
-     * 暂停期间 submit 不受影响，数据照常落盘，恢复后自动消化积压；
-     * 超时自动回滚（整组保持消费）后抛 {@link TimeoutException}，可加大预算重试。
+     * 运行时调整指定组的分区数。
      *
-     * @param groupKey  组 key，不可为 null
-     * @param timeoutMs 超时预算（毫秒，积压大时相应加大）
-     * @throws NullPointerException     groupKey 为 null
-     * @throws IllegalArgumentException 组不存在
-     * @throws IllegalStateException    组未启动
-     * @throws TimeoutException         预算内未完成（已自动回滚）
-     * @deprecated 临时暴露，仅用于暂停/恢复的测试与 example 演示；
-     *             热更新能力（resize）落地后将删除，请勿在正式业务中使用。
+     * @param groupKey   组 key，不可为 null
+     * @param newSize    目标分区数，&gt;= 1
+     * @param timeoutMs  整段超时预算（毫秒）
+     * @throws NullPointerException      groupKey 为 null
+     * @throws IllegalArgumentException  组不存在，或 newSize &lt; 1
+     * @throws IllegalStateException     组未启动，或组正在 shutdown
+     * @throws TimeoutException          预算内未完成（组内已回滚）
      */
-    @Deprecated
-    public void pauseGroup(String groupKey, long timeoutMs) throws TimeoutException {
+    public void resizeGroup(String groupKey, int newSize, long timeoutMs) throws TimeoutException {
         Objects.requireNonNull(groupKey, "groupKey must not be null");
         BatchWorkerGroup<?> group = groupMap.get(groupKey);
         if (group == null) {
             throw new IllegalArgumentException("worker group not found: key=" + groupKey);
         }
-        group.pauseAll(timeoutMs);
-    }
-
-    /**
-     * 恢复指定 Worker 组的消费，排空暂停期间积压。幂等可重试。
-     *
-     * @param groupKey  组 key，不可为 null
-     * @param timeoutMs 超时预算（毫秒）
-     * @throws NullPointerException     groupKey 为 null
-     * @throws IllegalArgumentException 组不存在
-     * @throws IllegalStateException    组未启动
-     * @throws TimeoutException         预算内未全部恢复，可重试
-     * @deprecated 临时暴露，仅用于暂停/恢复的测试与 example 演示；
-     *             热更新能力（resize）落地后将删除，请勿在正式业务中使用。
-     */
-    @Deprecated
-    public void resumeGroup(String groupKey, long timeoutMs) throws TimeoutException {
-        Objects.requireNonNull(groupKey, "groupKey must not be null");
-        BatchWorkerGroup<?> group = groupMap.get(groupKey);
-        if (group == null) {
-            throw new IllegalArgumentException("worker group not found: key=" + groupKey);
-        }
-        group.resumeAll(timeoutMs);
+        group.resize(newSize, timeoutMs);
     }
 
     /**
