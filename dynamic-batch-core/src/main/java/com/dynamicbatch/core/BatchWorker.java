@@ -1,6 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
+import com.dynamicbatch.common.enums.PausePhase;
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.queue.VariableLinkedBlockingQueue;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
@@ -11,6 +12,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 
@@ -23,6 +26,8 @@ import java.util.function.Consumer;
  *
  * <p>配置不落在本类：全部读取组共享的 {@link BatchWorkerGroupConfigPOJO}（同一实例），
  * 本类只保留 name 与 queue 两个自身状态。
+ *
+ * <p>支持运行中暂停/恢复：暂停在批次边界生效，不打断在途批次。
  */
 public class BatchWorker<T> {
     private static final Logger log = LoggerFactory.getLogger(BatchWorker.class);
@@ -38,6 +43,9 @@ public class BatchWorker<T> {
 
     private volatile boolean running;
     private Thread consumerThread;
+
+    /** 热更新暂停相位：协调方置 {@code *_PENDING}，消费线程在批次边界以 CAS 切换到终态 */
+    private final AtomicReference<PausePhase> pausePhase = new AtomicReference<>(PausePhase.RUNNING);
 
     /**
      * 由 {@link BatchWorkerGroup} 构造分区时直接调用，共享同一 config 实例；
@@ -55,6 +63,25 @@ public class BatchWorker<T> {
 
     public void setName(String name) {
         this.name = name;
+    }
+
+    // ======================== 暂停相位 ========================
+
+    /** 读当前相位，供协调方短轮询等待确认 */
+    PausePhase getPausePhase() {
+        return pausePhase.get();
+    }
+
+    /** 置「待暂停」意图（幂等） */
+    void requestPause() {
+        pausePhase.set(PausePhase.PAUSE_PENDING);
+    }
+
+    /** 置「待运行」意图，恢复与超时回滚共用；已 RUNNING 不写 */
+    void requestRun() {
+        if (pausePhase.get() != PausePhase.RUNNING) {
+            pausePhase.set(PausePhase.RUN_PENDING);
+        }
     }
 
     public synchronized void start() {
@@ -110,6 +137,24 @@ public class BatchWorker<T> {
         List<T> batch = new ArrayList<>(config.getBatchSize());
         while (running) {
             try {
+                // 暂停检查：批次边界生效，本批 flush 完回到此处才确认
+                PausePhase phase = pausePhase.get();
+                if (phase == PausePhase.PAUSE_PENDING || phase == PausePhase.PAUSED) {
+                    // 确认前排空篮子，保证已暂停时篮子必空
+                    if (!batch.isEmpty()) {
+                        flushBatch(batch);
+                        batch.clear();
+                    }
+                    // CAS 切换：期望不符说明相位已变（如协调方超时回滚），下轮重读重判
+                    pausePhase.compareAndSet(PausePhase.PAUSE_PENDING, PausePhase.PAUSED);
+                    Thread.sleep(BatchWorkerConstant.WAKEUP_INTERVAL_MS);
+                    continue;
+                }
+                if (phase == PausePhase.RUN_PENDING
+                        && !pausePhase.compareAndSet(PausePhase.RUN_PENDING, PausePhase.RUNNING)) {
+                    continue;   // 切换失败（相位已变）：重读，勿直接消费
+                }
+
                 // 用限时 poll 代替阻塞 take：running=false 后最迟 WAKEUP_INTERVAL_MS 感知到停止信号，
                 // 不会被攒批窗口（maxWaitMs 可能很大）卡住，关闭响应与攒批时长彻底解耦
                 T first = queue.poll(BatchWorkerConstant.WAKEUP_INTERVAL_MS, TimeUnit.MILLISECONDS);
@@ -233,6 +278,30 @@ public class BatchWorker<T> {
             for (int i = 0; i < remaining.size(); i += config.getBatchSize()) {
                 int end = Math.min(i + config.getBatchSize(), remaining.size());
                 flushBatch(remaining.subList(i, end));
+            }
+        }
+    }
+
+    /**
+     * 排空队列残留并分批刷盘，带超时（暂停期间由协调方调用，要求本 Worker 已暂停）。
+     * 逐批捞取：超时中断时未捞数据留在队列，恢复后继续消费，顺序不乱。
+     *
+     * @param timeoutMs 排空超时预算（毫秒）
+     * @throws TimeoutException 预算内未排空，剩余数据留在队列
+     */
+    void flushRemainingWithTimeout(long timeoutMs) throws TimeoutException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        List<T> batch = new ArrayList<>(config.getBatchSize());
+        while (true) {
+            batch.clear();
+            queue.drainTo(batch, config.getBatchSize());
+            if (batch.isEmpty()) {
+                return;   // 已排空（即使超时，排空即成功）
+            }
+            flushBatch(batch);
+            if (System.currentTimeMillis() > deadline && !queue.isEmpty()) {
+                throw new TimeoutException("flush remaining timed out after " + timeoutMs
+                        + "ms, worker=" + name + ", queueSize=" + queue.size());
             }
         }
     }

@@ -1,19 +1,21 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
+import com.dynamicbatch.common.enums.PausePhase;
 import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
 
 /**
  * Group 的分发线程：从 Spool poll 一条 → 投递到 Worker 队列，背压时短睡重试。
  *
  * <p>数据链路位置：{@code Spool(磁盘)} → <b>Dispatcher</b> → {@code Worker 内存队列} → flushCallback。
- * commit 2 由 {@link BatchWorkerGroup} 创建并编排启停。
+ * 由 {@link BatchWorkerGroup} 创建并编排启停。
  *
  * <p>不拥有路由逻辑（路由在 {@link #deliver} 的实现，通常为 Group 私有 {@code submitWorker} 的
  * {@code hash(routingKey) % partitions.size()}）。
@@ -24,10 +26,10 @@ import java.util.function.BiPredicate;
  *
  * <p>毒消息：poll 后反序列化/帧损坏抛异常 → 读位置已推进，打 error 日志后丢弃，继续循环。
  *
- * <p>中断临时约定（阶段 4 {@code forceStop} 升级前）：投递重试中 sleep 被 interrupt →
+ * <p>中断临时约定：投递重试中 sleep 被 interrupt →
  * warn 含 entry 摘要后丢弃本条并结束线程；空轮 sleep 被 interrupt → 恢复中断标志并结束线程。
  *
- * <p>阶段 2 预留：{@link #dispatchLoop} 循环顶部将插入 {@code PausePhase} CAS 翻牌（两条消息之间生效）。
+ * <p>暂停检查在循环顶部（两条消息之间生效）：PAUSED 时不取数，本条投递成功才确认暂停。
  */
 class Dispatcher<T> {
 
@@ -54,18 +56,21 @@ class Dispatcher<T> {
         SpoolEntryPOJO<T> poll(long lockTimeoutMs) throws TimeoutException;
     }
 
-    /** 取数函数，commit 2 接线为 {@code spool::poll} */
+    /** 取数函数，生产接线为 {@code spool::poll} */
     private final Poller<T> poller;
 
     /**
-     * 投递函数：将 routingKey + payload 投入 Worker 分区队列。
-     * commit 2 接线为 Group 私有 {@code this::submitWorker}。
+     * 投递函数：将 routingKey + payload 投入 Worker 分区队列，
+     * 生产接线为 Group 的 {@code submitWorker}。
      * 返回 true = 入队成功；false = Worker 队列满（正常背压，触发重试）。
      */
     private final BiPredicate<String, T> deliver;
 
     /** 分发线程运行标志，{@code false} 时外层 {@link #dispatchLoop} 退出 */
     private volatile boolean running;
+
+    /** 热更新暂停相位：协调方置 {@code *_PENDING}，分发线程在循环顶部以 CAS 切换到终态 */
+    private final AtomicReference<PausePhase> pausePhase = new AtomicReference<>(PausePhase.RUNNING);
 
     /** 分发线程引用，{@link #stop} 时 join / interrupt */
     private Thread thread;
@@ -83,11 +88,30 @@ class Dispatcher<T> {
     }
 
     /**
-     * 设置逻辑名称，须在 {@link #start} 前调用。
-     * commit 2 传 {@code "{groupKey}-dispatcher"}。
+     * 设置逻辑名称，须在 {@link #start} 前调用，
+     * 传 {@code "{groupKey}-dispatcher"}。
      */
     void setName(String name) {
         this.name = name;
+    }
+
+    // ======================== 暂停相位 ========================
+
+    /** 读当前相位，供协调方短轮询等待确认 */
+    PausePhase getPausePhase() {
+        return pausePhase.get();
+    }
+
+    /** 置「待暂停」意图（幂等） */
+    void requestPause() {
+        pausePhase.set(PausePhase.PAUSE_PENDING);
+    }
+
+    /** 置「待运行」意图，恢复与超时回滚共用；已 RUNNING 不写 */
+    void requestRun() {
+        if (pausePhase.get() != PausePhase.RUNNING) {
+            pausePhase.set(PausePhase.RUN_PENDING);
+        }
     }
 
     /**
@@ -141,6 +165,24 @@ class Dispatcher<T> {
      */
     private void dispatchLoop() {
         while (running) {
+            // 暂停检查：两条消息之间生效；PAUSED 时不取数，恢复后从读位置续读
+            PausePhase phase = pausePhase.get();
+            if (phase == PausePhase.PAUSE_PENDING || phase == PausePhase.PAUSED) {
+                // CAS 切换：期望不符说明相位已变（如协调方超时回滚），下轮重读重判
+                pausePhase.compareAndSet(PausePhase.PAUSE_PENDING, PausePhase.PAUSED);
+                try {
+                    Thread.sleep(LOOP_SLEEP_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                continue;
+            }
+            if (phase == PausePhase.RUN_PENDING
+                    && !pausePhase.compareAndSet(PausePhase.RUN_PENDING, PausePhase.RUNNING)) {
+                continue;   // 切换失败（相位已变）：重读，勿直接取数
+            }
+
             SpoolEntryPOJO<T> entry;
             try {
                 entry = poller.poll(POLL_LOCK_TIMEOUT_MS);

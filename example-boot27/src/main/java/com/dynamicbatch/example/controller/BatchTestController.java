@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RestController;
 import javax.annotation.PostConstruct;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.TimeoutException;
 
 /**
  * 分区演示入口：启动时注册一个 3 分区的 Worker 组。
@@ -23,6 +24,13 @@ import java.util.Map;
  *
  * # 批量投递：data 为 "1".."count"，routingKey 同 data（哈希散到各分区并行消费）
  * curl "http://localhost:8080/test-batch/batch-submit?count=1000"
+ *
+ * # 暂停消费：分发线程停止取数、各分区排空后待命；之后 submit 照常返回 ok（数据落盘不消费），
+ * # 可观察「只进不出」的削峰形态；resume 后积压全部消化
+ * curl "http://localhost:8080/test-batch/pause?timeoutMs=5000"
+ *
+ * # 恢复消费
+ * curl "http://localhost:8080/test-batch/resume?timeoutMs=5000"
  * </pre>
  */
 @RestController
@@ -92,5 +100,40 @@ public class BatchTestController {
         result.put("rejected", count - accepted);
         result.put("costMs", costMs);
         return result;
+    }
+
+    /**
+     * 暂停消费演示：分发线程停止从 Spool 取数，各分区排空手头批次与队列残留后待命。
+     * 暂停期间 /submit、/batch-submit 照常返回 ok（数据落盘不消费）；恢复后自动消化积压。
+     * 超时失败已自动回滚（整组保持消费），可加大 timeoutMs 重试。
+     *
+     * @deprecated 临时演示接口，热更新（resize）落地后随 pauseGroup 一并删除。
+     */
+    @Deprecated
+    @GetMapping("/pause")
+    public String pause(@RequestParam(defaultValue = "5000") long timeoutMs) {
+        try {
+            batchProcessor.pauseGroup(GROUP_KEY, timeoutMs);
+            return "ok: " + GROUP_KEY + " paused (submit still writes to spool)";
+        } catch (TimeoutException e) {
+            return "fail: pause timeout, rolled back: " + e.getMessage();
+        }
+    }
+
+    /**
+     * 恢复消费演示：各分区恢复运行后分发线程从磁盘读位置续读，排空暂停期间积压。
+     * 幂等可重试。
+     *
+     * @deprecated 临时演示接口，热更新（resize）落地后随 resumeGroup 一并删除。
+     */
+    @Deprecated
+    @GetMapping("/resume")
+    public String resume(@RequestParam(defaultValue = "5000") long timeoutMs) {
+        try {
+            batchProcessor.resumeGroup(GROUP_KEY, timeoutMs);
+            return "ok: " + GROUP_KEY + " resumed";
+        } catch (TimeoutException e) {
+            return "fail: resume timeout, retry allowed: " + e.getMessage();
+        }
     }
 }

@@ -1,6 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
+import com.dynamicbatch.common.enums.PausePhase;
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
@@ -16,7 +17,9 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * 批处理 Worker 组：磁盘缓冲 + 分发线程 + 分区 Worker 组的编排者。
@@ -114,7 +117,7 @@ public class BatchWorkerGroup<T> {
     /**
      * 按 spoolConfig 构建 {@code Spool<SpoolEntryPOJO<T>>}（信封序列化器外封 routingKey，
      * 使用方序列化器只管载荷）。非空字段才调对应 Builder 链式方法，null 走 Spool 默认值，
-     * 两边默认值不重复维护；泛型擦除的 unchecked 强转收敛到本方法（phase0-plan L3）。
+     * 两边默认值不重复维护；泛型擦除的 unchecked 强转收敛到本方法。
      * spoolConfig 非泛型：载荷类型由本类 type 统一提供，serializer 类型错配由双重 isInstance 兜底。
      */
     @SuppressWarnings("unchecked")
@@ -187,7 +190,7 @@ public class BatchWorkerGroup<T> {
             }
             return ok;
         } catch (Exception e) {
-            // 序列化失败（如载荷未实现 Serializable）等异常：submit 不抛异常的契约不破坏（phase0-plan L2）
+            // 序列化失败（如载荷未实现 Serializable）等异常：保持 submit 不抛异常的契约
             log.error("[{}] spool append failed", key, e);
             NotifyManager.getInstance().tryNoticeOfferFailedAsync(key,
                     "spool append 异常: " + e, config.getOfferTimeoutMs(), spool.stagingSize());
@@ -228,6 +231,98 @@ public class BatchWorkerGroup<T> {
         }
         spool.close();
         log.info("[{}] worker group stopped", key);
+    }
+
+    // ======================== 暂停/恢复 ========================
+
+    /**
+     * 暂停整组：分发线程停止取数，各 Worker 排空手头批次与队列残留后待命。
+     * 顺序：先分发线程后 Worker；整段共用超时预算，超时自动回滚（整组保持消费）后抛出。
+     * 暂停期间 submit 照常写入 Spool，恢复后自动消化积压。
+     *
+     * @param timeoutMs 整段超时预算（毫秒，含等确认与排空）
+     * @throws IllegalStateException 组未启动
+     * @throws TimeoutException      预算内未完成（已自动回滚）
+     */
+    void pauseAll(long timeoutMs) throws TimeoutException {
+        if (!running) {
+            throw new IllegalStateException("[" + key + "] group not started");
+        }
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        try {
+            // ① 暂停分发线程并等待确认
+            dispatcher.requestPause();
+            awaitPhase(dispatcher::getPausePhase, PausePhase.PAUSED, deadline, "dispatcher");
+            // ② 暂停全部 Worker 并等待确认
+            for (BatchWorker<T> worker : partitions) {
+                worker.requestPause();
+            }
+            int index = 0;
+            for (BatchWorker<T> worker : partitions) {
+                awaitPhase(worker::getPausePhase, PausePhase.PAUSED, deadline, "worker-" + index++);
+            }
+            // ③ 逐个排空队列残留
+            index = 0;
+            for (BatchWorker<T> worker : partitions) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    throw new TimeoutException("[" + key + "] pause budget exhausted before drain worker-" + index);
+                }
+                worker.flushRemainingWithTimeout(remaining);
+                index++;
+            }
+        } catch (TimeoutException e) {
+            // 超时回滚：整组置「请恢复」，保持消费
+            dispatcher.requestRun();
+            for (BatchWorker<T> worker : partitions) {
+                worker.requestRun();
+            }
+            log.warn("[{}] pauseAll timed out, rolled back to running", key, e);
+            throw e;
+        }
+        log.info("[{}] worker group paused, partitions={}", key, partitions.size());
+    }
+
+    /**
+     * 恢复整组：各 Worker 恢复运行后分发线程续投。幂等可重试；超时不回滚，可直接重试。
+     *
+     * @param timeoutMs 整段超时预算（毫秒）
+     * @throws IllegalStateException 组未启动
+     * @throws TimeoutException      预算内未全部恢复
+     */
+    void resumeAll(long timeoutMs) throws TimeoutException {
+        if (!running) {
+            throw new IllegalStateException("[" + key + "] group not started");
+        }
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        // ① 全部 Worker 置待运行（先全部置、再逐个等）→ 等全部 RUNNING
+        for (BatchWorker<T> worker : partitions) {
+            worker.requestRun();
+        }
+        int index = 0;
+        for (BatchWorker<T> worker : partitions) {
+            awaitPhase(worker::getPausePhase, PausePhase.RUNNING, deadline, "worker-" + index++);
+        }
+        // ② 分发线程置待运行 → 等 RUNNING
+        dispatcher.requestRun();
+        awaitPhase(dispatcher::getPausePhase, PausePhase.RUNNING, deadline, "dispatcher");
+        log.info("[{}] worker group resumed", key);
+    }
+
+    /** 短轮询等待相位翻到期望值，超时抛 {@link TimeoutException} */
+    private static void awaitPhase(Supplier<PausePhase> phase, PausePhase expected,
+                                   long deadline, String target) throws TimeoutException {
+        while (phase.get() != expected) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new TimeoutException("wait phase " + expected + " timed out, target=" + target);
+            }
+            try {
+                Thread.sleep(BatchWorkerConstant.PAUSE_POLL_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new TimeoutException("wait phase " + expected + " interrupted, target=" + target);
+            }
+        }
     }
 
     // ======================== Builder ========================

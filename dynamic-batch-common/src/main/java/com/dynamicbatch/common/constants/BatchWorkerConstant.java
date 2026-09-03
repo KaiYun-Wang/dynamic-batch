@@ -19,4 +19,6 @@ public class BatchWorkerConstant {
     public static final long DEFAULT_OFFER_TIMEOUT_MS = 100;
     /** Worker 组默认分区数：每分区一个队列 + 单线程消费者 */
     public static final int DEFAULT_PARTITION_COUNT = 1;
+    /** 暂停/恢复后每隔多久检查一次相位是否已从「待状态」切换到「已状态」（毫秒） */
+    public static final long PAUSE_POLL_INTERVAL_MS = 50L;
 }
