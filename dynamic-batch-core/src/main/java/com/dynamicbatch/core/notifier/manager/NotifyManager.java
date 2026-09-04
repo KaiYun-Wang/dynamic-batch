@@ -1,21 +1,16 @@
 package com.dynamicbatch.core.notifier.manager;
 
 import com.dynamicbatch.common.enums.NotifyTypeEnum;
-import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.NotifyItemPOJO;
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
 import com.dynamicbatch.core.notifier.limiter.NotifyLimiter;
 import com.dynamicbatch.core.notifier.channel.NotifierRegistry;
-import com.dynamicbatch.core.notifier.context.ChangeContext;
 import com.dynamicbatch.core.notifier.context.FlushFailedContext;
 import com.dynamicbatch.core.notifier.context.NotifyContext;
 import com.dynamicbatch.core.notifier.context.OfferFailedContext;
-import com.dynamicbatch.core.notifier.context.QueueBlockedContext;
-import com.dynamicbatch.core.notifier.template.ChangeNoticeTemplate;
 import com.dynamicbatch.core.notifier.template.FlushFailedNoticeTemplate;
 import com.dynamicbatch.core.notifier.template.NoticeTemplate;
 import com.dynamicbatch.core.notifier.template.OfferFailedNoticeTemplate;
-import com.dynamicbatch.core.notifier.template.QueueBlockedNoticeTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,8 +26,8 @@ import java.util.concurrent.TimeUnit;
 /**
  * 通知门面：业务事件 → 按场景构造上下文 → 选模板构建内容 → 异步分发到渠道。
  *
- * <p>触发点按场景调用对应入口方法（如 {@link #tryNoticeChangeAsync}），一行投递纯数据；
- * 入口内部绑定通知类型并构造场景上下文（{@link ChangeContext} 等），内容构建由对应
+ * <p>触发点按场景调用对应入口方法（如 {@link #tryNoticeOfferFailedAsync}），一行投递纯数据；
+ * 入口内部绑定通知类型并构造场景上下文（{@link OfferFailedContext} 等），内容构建由对应
  * {@link NoticeTemplate} 负责（模板返回 null 表示本次无需发送），平台分发由渠道层完成，
  * 触发点与门面都不感知渠道细节。
  * 平台配置由 spring 层启动时通过 {@link #init} 注入（yml 绑定）；未配置平台时通知
@@ -61,10 +56,8 @@ public class NotifyManager {
     private volatile List<NotifyPlatformPOJO> platforms = Collections.emptyList();
 
     private NotifyManager() {
-        registerTemplate(new ChangeNoticeTemplate());
         registerTemplate(new OfferFailedNoticeTemplate());
         registerTemplate(new FlushFailedNoticeTemplate());
-        registerTemplate(new QueueBlockedNoticeTemplate());
     }
 
     public static NotifyManager getInstance() {
@@ -108,30 +101,16 @@ public class NotifyManager {
     }
 
     /**
-     * 配置变更通知：worker 热更新完成后投递，异步执行立即返回。
-     *
-     * <p>入口内部绑定 {@link NotifyTypeEnum#CHANGE} 并构造 {@link ChangeContext}；
-     * 新旧配置无实际差异（相同配置反复推送）时模板返回 null，不发送。
+     * 入队失败告警：submit 入口被拒（组未启动 / 类型不匹配 / Spool 拒绝 / 写入异常），
+     * 及 Worker 侧类型不匹配毒丸时投递，异步执行立即返回。
      *
      * @param key       worker 唯一标识
-     * @param oldConfig 变更前生效中的配置快照（全字段非 null）
-     * @param newConfig 本次传入的配置（可能部分字段为 null）
+     * @param reason    失败原因描述
+     * @param queueSize 失败时刻队列中的元素数量
      */
-    public void tryNoticeChangeAsync(String key, BatchWorkerGroupConfigPOJO oldConfig, BatchWorkerGroupConfigPOJO newConfig) {
-        NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.CHANGE, new ChangeContext(key, oldConfig, newConfig)));
-    }
-
-    /**
-     * 入队失败告警：worker 提交失败（未运行 / 类型不匹配 / 队列满超时 / 中断）时投递，异步执行立即返回。
-     *
-     * @param key            worker 唯一标识
-     * @param reason         失败原因描述
-     * @param offerTimeoutMs 入队超时毫秒
-     * @param queueSize      失败时刻队列中的元素数量
-     */
-    public void tryNoticeOfferFailedAsync(String key, String reason, long offerTimeoutMs, int queueSize) {
+    public void tryNoticeOfferFailedAsync(String key, String reason, int queueSize) {
         NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.OFFER_FAILED,
-                new OfferFailedContext(key, reason, offerTimeoutMs, queueSize)));
+                new OfferFailedContext(key, reason, queueSize)));
     }
 
     /**
@@ -145,22 +124,6 @@ public class NotifyManager {
     public void tryNoticeFlushFailedAsync(String key, int failedSize, String errorMsg, boolean dataLossRisk) {
         NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.FLUSH_FAILED,
                 new FlushFailedContext(key, failedSize, errorMsg, dataLossRisk)));
-    }
-
-    /**
-     * 队列积压告警：定时检查（spring 层 monitor）发现队列利用率超阈值时投递，异步执行立即返回。
-     *
-     * <p>阈值判断由定时任务完成，本入口只负责投递现场数据；静默期照常生效（NotifyLimiter），
-     * 可用来限制重复告警频率：检查周期决定发现延迟，静默期决定提醒间隔，两者解耦。
-     *
-     * @param key          分区唯一标识（"{组key}-{分区序号}"）
-     * @param queueSize     检查时刻队列中的元素数量
-     * @param queueCapacity 队列容量
-     * @param threshold     告警阈值（百分比），仅用于消息展示
-     */
-    public void tryNoticeQueueBlockedAsync(String key, int queueSize, int queueCapacity, int threshold) {
-        NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.QUEUE_BLOCKED,
-                new QueueBlockedContext(key, queueSize, queueCapacity, threshold)));
     }
 
     @SuppressWarnings("unchecked")

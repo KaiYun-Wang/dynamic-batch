@@ -175,7 +175,7 @@ public class BatchWorkerGroup<T> {
         if (!running) {
             log.warn("[{}] submit rejected, group not running", key);
             NotifyManager.getInstance().tryNoticeOfferFailedAsync(key, "组未启动或已关闭",
-                    config.getOfferTimeoutMs(), spool == null ? 0 : spool.stagingSize());
+                    spool == null ? 0 : spool.stagingSize());
             return false;
         }
         // 类型校验（fail fast）：错误类型的数据在业务线程就拒绝，避免落盘后才暴露；
@@ -186,7 +186,7 @@ public class BatchWorkerGroup<T> {
             NotifyManager.getInstance().tryNoticeOfferFailedAsync(key,
                     "类型不匹配: expected=" + type.getName() + ", got="
                             + (data == null ? "null" : data.getClass().getName()),
-                    config.getOfferTimeoutMs(), spool.stagingSize());
+                    spool.stagingSize());
             return false;
         }
         try {
@@ -195,14 +195,14 @@ public class BatchWorkerGroup<T> {
                 log.warn("[{}] spool append rejected, stagingSize={}", key, spool.stagingSize());
                 NotifyManager.getInstance().tryNoticeOfferFailedAsync(key,
                         "spool 拒绝（磁盘预算满或暂存队列满超时）",
-                        config.getOfferTimeoutMs(), spool.stagingSize());
+                        spool.stagingSize());
             }
             return ok;
         } catch (Exception e) {
             // 序列化失败（如载荷未实现 Serializable）等异常：保持 submit 不抛异常的契约
             log.error("[{}] spool append failed", key, e);
             NotifyManager.getInstance().tryNoticeOfferFailedAsync(key,
-                    "spool append 异常: " + e, config.getOfferTimeoutMs(), spool.stagingSize());
+                    "spool append 异常: " + e, spool.stagingSize());
             return false;
         }
     }
@@ -404,7 +404,6 @@ public class BatchWorkerGroup<T> {
             config.setQueueCapacity(BatchWorkerConstant.DEFAULT_QUEUE_CAPACITY);
             config.setBatchSize(BatchWorkerConstant.DEFAULT_BATCH_SIZE);
             config.setMaxWaitMs(BatchWorkerConstant.DEFAULT_MAX_WAIT_MS);
-            config.setOfferTimeoutMs(BatchWorkerConstant.DEFAULT_OFFER_TIMEOUT_MS);
         }
 
         public Builder<T> partitionCount(int partitionCount) {
@@ -424,11 +423,6 @@ public class BatchWorkerGroup<T> {
 
         public Builder<T> maxWaitMs(long maxWaitMs) {
             config.setMaxWaitMs(maxWaitMs);
-            return this;
-        }
-
-        public Builder<T> offerTimeoutMs(long offerTimeoutMs) {
-            config.setOfferTimeoutMs(offerTimeoutMs);
             return this;
         }
 

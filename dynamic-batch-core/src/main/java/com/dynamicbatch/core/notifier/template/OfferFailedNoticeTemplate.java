@@ -10,8 +10,8 @@ import java.time.format.DateTimeFormatter;
 /**
  * 入队失败告警模板。
  *
- * <p>渲染 submit 被拒绝时的现场信息：worker、失败原因、入队超时、失败时刻队列水位。
- * 内容为 markdown 列表格式（钉钉/企微均支持），与 {@link ChangeNoticeTemplate} 风格一致。
+ * <p>渲染 submit 被拒绝时的现场信息：worker、失败原因、失败时刻队列水位。
+ * 内容为 markdown 列表格式（钉钉/企微均支持），与 {@link FlushFailedNoticeTemplate} 风格一致。
  */
 public class OfferFailedNoticeTemplate implements NoticeTemplate<OfferFailedContext> {
 
@@ -29,7 +29,6 @@ public class OfferFailedNoticeTemplate implements NoticeTemplate<OfferFailedCont
         content.append("- worker: `").append(context.getKey()).append("`\n");
         content.append("- 实例: `").append(AppInstance.instanceLabel()).append("`\n");
         content.append("- 原因: ").append(context.getReason()).append("\n");
-        content.append("- 入队超时: ").append(context.getOfferTimeoutMs()).append("ms\n");
         content.append("- 当前队列: ").append(context.getQueueSize()).append("\n");
         content.append("- 时间: ").append(LocalDateTime.now().format(TIME_FORMAT)).append("\n");
         return content.toString();

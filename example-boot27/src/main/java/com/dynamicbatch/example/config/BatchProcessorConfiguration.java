@@ -38,7 +38,6 @@ public class BatchProcessorConfiguration {
                         .queueCapacity(100)
                         .batchSize(5)
                         .maxWaitMs(2000)
-                        .offerTimeoutMs(100)
                         .failureHandler(failed -> log.error("demo insert flush failed, size={}", failed.size()))
                         .build()
         );
@@ -49,7 +48,6 @@ public class BatchProcessorConfiguration {
                         .queueCapacity(256)
                         .batchSize(20)
                         .maxWaitMs(500)
-                        .offerTimeoutMs(50)
                         .partitionCount(2)
                         .failureHandler(failed -> log.error("demo update flush failed, size={}", failed.size()))
                         .build()

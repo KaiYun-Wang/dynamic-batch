@@ -2,6 +2,8 @@ package com.dynamicbatch.example.controller;
 
 import com.dynamicbatch.core.BatchProcessor;
 import com.dynamicbatch.core.BatchWorker;
+import com.dynamicbatch.core.BatchWorkerGroup;
+import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import com.dynamicbatch.example.config.BatchProcessorConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,6 +11,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import javax.annotation.PostConstruct;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -20,9 +23,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>填好 application.yml 中的 dynamic-batch.notify.platforms 后启动：
  * <pre>
- * curl -X POST "http://localhost:8080/fail-test/offer-full"           # 入队失败：队列满超时
+ * curl -X POST "http://localhost:8080/fail-test/offer-full"           # 队列满背压：仅 debug 日志，不上报告警（告警收敛后）
  * curl -X POST "http://localhost:8080/fail-test/offer-type-mismatch"  # 入队失败：类型不匹配
  * curl -X POST "http://localhost:8080/fail-test/offer-stopped"        # 入队失败：worker 已关闭
+ * curl -X POST "http://localhost:8080/fail-test/offer-spool-full"     # 入队失败：spool 磁盘预算满
  * curl -X POST "http://localhost:8080/fail-test/flush-error"          # 批次失败：failureHandler 接管
  * curl -X POST "http://localhost:8080/fail-test/flush-error-loss"     # 批次失败：数据丢失风险
  * </pre>
@@ -34,8 +38,11 @@ public class NotifyFailureTestController {
 
     private static final Logger log = LoggerFactory.getLogger(NotifyFailureTestController.class);
 
-    /** 队列满场景使用的 processor worker：demo_item_insert 容量 100、单消费线程、入队超时 100ms */
+    /** 队列满场景使用的 processor worker：demo_item_insert 容量 100、单消费线程 */
     private static final String FULL_WORKER = BatchProcessorConfiguration.DEMO_INSERT;
+
+    /** Spool 预算打满演示组：maxSizeBytes 16MB 低于 Chronicle 初始块（~80MB），首块落盘即超预算，后续 submit 全部被拒 */
+    private static final String SPOOL_FULL_GROUP = "spool_full_demo";
 
     private final BatchProcessor batchProcessor;
 
@@ -57,7 +64,24 @@ public class NotifyFailureTestController {
         this.stoppedWorker.setName("test_offer_stopped");
     }
 
-    /** 构造一个消费极慢的 worker 并启动：flush 睡 2s，队列容量 10，入队超时 10ms，保证提交必满 */
+    /** 注册 Spool 预算打满演示组：flush 空操作，仅用于触发 offer_failed 告警 */
+    @PostConstruct
+    public void registerSpoolFullDemoGroup() {
+        try {
+            batchProcessor.registerGroup(SPOOL_FULL_GROUP,
+                    BatchWorkerGroup.builder(String.class,
+                                    SpoolConfigPOJO.builder("spool-demo-full")
+                                            .maxSizeBytes(16L * 1024 * 1024)
+                                            .build(),
+                                    batch -> { })
+                            .build());
+            log.info("spool_full_demo 组已注册, maxSizeBytes=16MB");
+        } catch (IllegalStateException e) {
+            log.warn("spool_full_demo 组已存在, 跳过注册: {}", e.getMessage());
+        }
+    }
+
+    /** 构造一个消费极慢的 worker 并启动：flush 睡 2s，队列容量 10，保证提交必满 */
     private static BatchWorker<String> buildSlowConsumerWorker() {
         BatchWorker<String> worker = BatchWorker.builder(String.class, batch -> {
             try {
@@ -69,7 +93,6 @@ public class NotifyFailureTestController {
                 .queueCapacity(10)
                 .batchSize(5)
                 .maxWaitMs(100)
-                .offerTimeoutMs(10)
                 .build();
         worker.setName("test_slow_consumer");
         worker.start();
@@ -93,9 +116,9 @@ public class NotifyFailureTestController {
     }
 
     /**
-     * 入队失败：队列满超时。
+     * 队列满背压演示：队列满是链路中间的正常背压（数据还在磁盘缓冲），不上报告警，仅 debug 日志。
      * 8 线程并发向容量 10、flush 睡 2s 的慢消费 worker 灌 200 条：
-     * 消费线程卡在 flush 里，队列瞬间打满，submit 阻塞 10ms 超时返回 false。
+     * 消费线程卡在 flush 里，队列瞬间打满，submit 返回 false。
      */
     @PostMapping("/offer-full")
     public String offerFull() throws InterruptedException {
@@ -126,8 +149,8 @@ public class NotifyFailureTestController {
         startLatch.countDown();
         pool.shutdown();
         pool.awaitTermination(30, TimeUnit.SECONDS);
-        return "并发提交完成：成功=" + ok.get() + "，入队超时失败=" + failed.get()
-                + "（失败已触发钉钉告警，当前队列剩余=" + slowConsumerWorker.getQueueSize() + "）";
+        return "并发提交完成：成功=" + ok.get() + "，队列满背压拒绝=" + failed.get()
+                + "（队列满是正常背压不上报告警，仅 debug 日志；当前队列剩余=" + slowConsumerWorker.getQueueSize() + "）";
     }
 
     /** 入队失败：类型不匹配（向 DemoItem worker 组提交 String） */
@@ -142,6 +165,23 @@ public class NotifyFailureTestController {
     public String offerStopped() {
         boolean ok = stoppedWorker.submit("data");
         return "提交返回=" + ok + "（应为 false，已触发 worker 已关闭告警）";
+    }
+
+    /**
+     * 入队失败：spool 磁盘预算满。数据被挡在门外（业务方拿到 false，未落盘），属会丢数据的断点，告警。
+     * 演示组 maxSizeBytes=16MB 低于 Chronicle 初始块（~80MB），首块落盘即超预算，此后 submit 全部被拒。
+     */
+    @PostMapping("/offer-spool-full")
+    public String offerSpoolFull() {
+        int total = 100;
+        int accepted = 0;
+        for (int i = 0; i < total; i++) {
+            if (batchProcessor.submit(SPOOL_FULL_GROUP, "k-" + i, "data-" + i)) {
+                accepted++;
+            }
+        }
+        return "提交 " + total + " 条：成功=" + accepted + "，被拒=" + (total - accepted)
+                + "（被拒触发 offer_failed 告警：spool 拒绝（磁盘预算满或暂存队列满超时）；offer_failed 静默期 30 秒，30 秒内只发一条）";
     }
 
     /** 批次执行失败：flush 抛异常，failureHandler 接管（消息应显示无丢失风险） */

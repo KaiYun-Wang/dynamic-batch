@@ -86,8 +86,7 @@ public class BatchWorker<T> {
         // 已关闭则直接拒绝：避免「返回 true 但数据入队后无人消费」的静默丢失
         if (!running) {
             log.warn("[{}] submit rejected, worker not running", name);
-            NotifyManager.getInstance().tryNoticeOfferFailedAsync(
-                    name, "worker 已关闭", config.getOfferTimeoutMs(), queue.size());
+            NotifyManager.getInstance().tryNoticeOfferFailedAsync(name, "worker 已关闭", queue.size());
             return false;
         }
         // 类型校验（fail fast）：错误类型的数据在业务线程就拒绝，
@@ -98,24 +97,17 @@ public class BatchWorker<T> {
                     name, type.getName(), data == null ? "null" : data.getClass().getName());
             NotifyManager.getInstance().tryNoticeOfferFailedAsync(name,
                     "类型不匹配: expected=" + type.getName() + ", got=" + (data == null ? "null" : data.getClass().getName()),
-                    config.getOfferTimeoutMs(), queue.size());
+                    queue.size());
             return false;
         }
-        try {
-            boolean ok = queue.offer(data, config.getOfferTimeoutMs(), TimeUnit.MILLISECONDS);
-            if (!ok) {
-                log.warn("[{}] queue full, offer timed out after {}ms", name, config.getOfferTimeoutMs());
-                NotifyManager.getInstance().tryNoticeOfferFailedAsync(
-                        name, "队列已满，offer 超时", config.getOfferTimeoutMs(), queue.size());
-            }
-            return ok;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();   // 关键：恢复中断标志
-            log.warn("[{}] submit interrupted", name);
-            NotifyManager.getInstance().tryNoticeOfferFailedAsync(
-                    name, "submit 被中断", config.getOfferTimeoutMs(), queue.size());
+        // 非阻塞入队：队列满立即返回 false，由投递方（Dispatcher）短睡重试背压；
+        // 队列满是链路中间的正常背压（数据仍在磁盘缓冲，一条不丢），不上报告警；
+        // 背压期间重试方每轮都会走到这里，打 debug 防止刷屏
+        if (!queue.offer(data)) {
+            log.debug("[{}] queue full, entry rejected for backpressure retry", name);
             return false;
         }
+        return true;
     }
 
     private void consumeLoop() {
@@ -266,7 +258,6 @@ public class BatchWorker<T> {
         int queueCapacity = config.getQueueCapacity();
         int batchSize = config.getBatchSize();
         long maxWaitMs = config.getMaxWaitMs();
-        long offerTimeoutMs = config.getOfferTimeoutMs();
         if (batchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be > 0, got " + batchSize);
         }
@@ -278,9 +269,6 @@ public class BatchWorker<T> {
         }
         if (maxWaitMs < 0) {
             throw new IllegalArgumentException("maxWaitMs must be >= 0, got " + maxWaitMs);
-        }
-        if (offerTimeoutMs < 0) {
-            throw new IllegalArgumentException("offerTimeoutMs must be >= 0, got " + offerTimeoutMs);
         }
     }
 
@@ -318,7 +306,6 @@ public class BatchWorker<T> {
             config.setQueueCapacity(BatchWorkerConstant.DEFAULT_QUEUE_CAPACITY);
             config.setBatchSize(BatchWorkerConstant.DEFAULT_BATCH_SIZE);
             config.setMaxWaitMs(BatchWorkerConstant.DEFAULT_MAX_WAIT_MS);
-            config.setOfferTimeoutMs(BatchWorkerConstant.DEFAULT_OFFER_TIMEOUT_MS);
         }
 
         public Builder<T> queueCapacity(int queueCapacity) {
@@ -333,11 +320,6 @@ public class BatchWorker<T> {
 
         public Builder<T> maxWaitMs(long maxWaitMs) {
             config.setMaxWaitMs(maxWaitMs);
-            return this;
-        }
-
-        public Builder<T> offerTimeoutMs(long offerTimeoutMs) {
-            config.setOfferTimeoutMs(offerTimeoutMs);
             return this;
         }
 

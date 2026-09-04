@@ -64,7 +64,6 @@ public class GroupSpoolIntegrationTest {
                         .queueCapacity(1024)
                         .batchSize(100)
                         .maxWaitMs(100)
-                        .offerTimeoutMs(1000)
                         .build());
 
         int total = 10_000;

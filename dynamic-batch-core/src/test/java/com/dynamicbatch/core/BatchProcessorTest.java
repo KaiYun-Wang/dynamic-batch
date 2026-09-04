@@ -61,7 +61,6 @@ public class BatchProcessorTest {
                         .queueCapacity(100)
                         .batchSize(3)
                         .maxWaitMs(2000)
-                        .offerTimeoutMs(1000)
                         .build());
 
         assertTrue(processor.submit("demo", "r1", "a"));
@@ -86,7 +85,6 @@ public class BatchProcessorTest {
                         .queueCapacity(100)
                         .batchSize(100)
                         .maxWaitMs(60_000)
-                        .offerTimeoutMs(1000)
                         .build());
 
         assertTrue(processor.submit("remain", "r1", 1));
@@ -145,7 +143,6 @@ public class BatchProcessorTest {
                         .queueCapacity(2000)
                         .batchSize(500)
                         .maxWaitMs(50)
-                        .offerTimeoutMs(1000)
                         .partitionCount(4)
                         .build());
 
@@ -179,7 +176,6 @@ public class BatchProcessorTest {
                         .queueCapacity(2000)
                         .batchSize(1)
                         .maxWaitMs(50)
-                        .offerTimeoutMs(1000)
                         .partitionCount(4)
                         .build());
 

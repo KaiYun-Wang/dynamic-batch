@@ -1,6 +1,5 @@
 package com.dynamicbatch.core.notifier.manager;
 
-import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
 import com.dynamicbatch.core.notifier.channel.Notifier;
 import com.dynamicbatch.core.notifier.channel.NotifierRegistry;
@@ -31,83 +30,28 @@ public class NotifyManagerTest {
     }
 
     @Test
-    public void changeNoticeContainsKeyAndChangedFields() {
-        BatchWorkerGroupConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L);
-        BatchWorkerGroupConfigPOJO newConfig = new BatchWorkerGroupConfigPOJO();
-        newConfig.setQueueCapacity(2000);
-        newConfig.setBatchSize(200);
-
-        NotifyManager.getInstance().tryNoticeChangeAsync("DeviceDTO:insert", oldConfig, newConfig);
+    public void offerFailedNoticeContainsReasonAndQueueSize() {
+        NotifyManager.getInstance().tryNoticeOfferFailedAsync("wky", "组未启动或已关闭", 7);
 
         String content = fake.awaitContent(2000);
         assertNotNull(content);
-        assertTrue(content.contains("DeviceDTO:insert"));
-        assertTrue(content.contains("队列容量"));
-        assertTrue(content.contains("1000 → 2000"));
-        assertTrue(content.contains("攒批条数"));
-        assertTrue(content.contains("100 → 200"));
-    }
-
-    @Test
-    public void sameValuesSkipsSend() {
-        BatchWorkerGroupConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L);
-        BatchWorkerGroupConfigPOJO newConfig = new BatchWorkerGroupConfigPOJO();
-        // 与旧值相同：不应发送，避免相同配置反复推送刷屏
-        newConfig.setQueueCapacity(1000);
-        newConfig.setBatchSize(100);
-
-        NotifyManager.getInstance().tryNoticeChangeAsync("k", oldConfig, newConfig);
-
-        assertNull(fake.awaitContent(1000));
-    }
-
-    @Test
-    public void nullFieldsAreIgnoredInDiff() {
-        BatchWorkerGroupConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L);
-        // 全 null = 无更新意图，不应发送
-        NotifyManager.getInstance().tryNoticeChangeAsync("k", oldConfig, new BatchWorkerGroupConfigPOJO());
-
-        assertNull(fake.awaitContent(1000));
+        assertTrue(content.contains("wky"));
+        assertTrue(content.contains("组未启动或已关闭"));
+        assertTrue(content.contains("当前队列: 7"));
     }
 
     @Test
     public void noPlatformsSkipsSend() {
         NotifyManager.getInstance().init(Collections.emptyList());
-        BatchWorkerGroupConfigPOJO oldConfig = fullConfig(1000, 100, 2000L, 500L);
-        BatchWorkerGroupConfigPOJO newConfig = new BatchWorkerGroupConfigPOJO();
-        newConfig.setQueueCapacity(2000);
-
-        NotifyManager.getInstance().tryNoticeChangeAsync("k", oldConfig, newConfig);
+        NotifyManager.getInstance().tryNoticeOfferFailedAsync("k", "worker 已关闭", 0);
 
         assertNull(fake.awaitContent(1000));
-    }
-
-    @Test
-    public void queueBlockedNoticeContainsQueueWaterLevel() {
-        NotifyManager.getInstance().tryNoticeQueueBlockedAsync("wky", 80, 100, 80);
-
-        String content = fake.awaitContent(2000);
-        assertNotNull(content);
-        assertTrue(content.contains("wky"));
-        assertTrue(content.contains("80/100"));
-        assertTrue(content.contains("80.0%"));
-        assertTrue(content.contains("阈值: 80%"));
     }
 
     private static NotifyPlatformPOJO platform(String name) {
         NotifyPlatformPOJO p = new NotifyPlatformPOJO();
         p.setPlatform(name);
         return p;
-    }
-
-    private static BatchWorkerGroupConfigPOJO fullConfig(int queueCapacity, int batchSize,
-                                                    long maxWaitMs, long offerTimeoutMs) {
-        BatchWorkerGroupConfigPOJO config = new BatchWorkerGroupConfigPOJO();
-        config.setQueueCapacity(queueCapacity);
-        config.setBatchSize(batchSize);
-        config.setMaxWaitMs(maxWaitMs);
-        config.setOfferTimeoutMs(offerTimeoutMs);
-        return config;
     }
 
     /** 测试用假渠道，记录发送次数与最近内容（发送为异步，用轮询等待） */

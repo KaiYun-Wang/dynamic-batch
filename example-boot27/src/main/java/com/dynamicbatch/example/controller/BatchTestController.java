@@ -55,7 +55,6 @@ public class BatchTestController {
                             .queueCapacity(200)
                             .batchSize(5)
                             .maxWaitMs(2000)
-                            .offerTimeoutMs(200)
                             .partitionCount(3)
                             .build());
             log.info("test-batch 组已注册, group={}, partitions=3", GROUP_KEY);

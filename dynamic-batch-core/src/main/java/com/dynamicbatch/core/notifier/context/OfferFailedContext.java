@@ -9,24 +9,17 @@ package com.dynamicbatch.core.notifier.context;
 public class OfferFailedContext extends NotifyContext {
 
     private final String reason;
-    private final long offerTimeoutMs;
     private final int queueSize;
 
-    public OfferFailedContext(String key, String reason, long offerTimeoutMs, int queueSize) {
+    public OfferFailedContext(String key, String reason, int queueSize) {
         super(key);
         this.reason = reason;
-        this.offerTimeoutMs = offerTimeoutMs;
         this.queueSize = queueSize;
     }
 
-    /** 失败原因（worker 未运行 / 类型不匹配 / 队列满超时 / 被中断） */
+    /** 失败原因（组未启动 / 类型不匹配 / Spool 拒绝 / 写入异常等） */
     public String getReason() {
         return reason;
-    }
-
-    /** 入队超时毫秒（队列满场景下体现等待时长） */
-    public long getOfferTimeoutMs() {
-        return offerTimeoutMs;
     }
 
     /** 失败时刻队列中的元素数量（体现积压程度） */

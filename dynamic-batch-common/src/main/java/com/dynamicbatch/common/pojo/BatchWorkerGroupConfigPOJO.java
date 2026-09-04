@@ -12,14 +12,12 @@ package com.dynamicbatch.common.pojo;
  */
 public class BatchWorkerGroupConfigPOJO {
 
-    /** 队列容量，超过此值入队会阻塞直到超时 */
+    /** 内存队列容量上限（队列满时由投递方背压处理，见 {@code BatchWorker#submit}） */
     private Integer queueCapacity;
     /** 攒批条数，达到此数量立即触发 flush */
     private Integer batchSize;
     /** 最大等待毫秒，未攒满时最多等这么久再 flush（从收到第一条数据开始计时） */
     private Long maxWaitMs;
-    /** 入队超时毫秒，队列满时 {@code submit} 最多阻塞这么久，超时返回 false */
-    private Long offerTimeoutMs;
 
     public Integer getQueueCapacity() {
         return queueCapacity;
@@ -43,13 +41,5 @@ public class BatchWorkerGroupConfigPOJO {
 
     public void setMaxWaitMs(Long maxWaitMs) {
         this.maxWaitMs = maxWaitMs;
-    }
-
-    public Long getOfferTimeoutMs() {
-        return offerTimeoutMs;
-    }
-
-    public void setOfferTimeoutMs(Long offerTimeoutMs) {
-        this.offerTimeoutMs = offerTimeoutMs;
     }
 }

@@ -19,10 +19,8 @@ management:
 #   POST /notify/email?content=xxx（需引入 spring-boot-starter-mail）
 #
 # 通知类型（无需额外配置，触发即发）：
-#   change        配置变更通知（BatchProcessor.refresh 后）
-#   offer_failed  入队失败告警（submit 被拒绝：已关闭/类型不匹配/队列满超时/中断）
+#   offer_failed  入队失败告警（submit 入口被拒：组未启动/类型不匹配/Spool 拒绝/写入异常，及类型不匹配毒丸）
 #   flush_failed  批次执行失败告警（flush 回调抛异常）
-#   queue_blocked 队列积压告警（定时检查队列利用率 ≥ 阈值；配了 notify-items 才启动）
 #
 # 通知项（可选）每个类型可配静默期，不配或配 0 = 不限流（向后兼容）：
 #   notify-items:
@@ -30,10 +28,6 @@ management:
 #       silence-period: 300       # 静默期（秒），300 秒内不再重复发送
 #     - type: flush_failed
 #       silence-period: 300
-#     - type: queue_blocked       # 队列积压：配了此项才启动定时检查（移除即关闭）
-#       interval-seconds: 60      # 检查周期（秒），默认 60；越小发现积压越快（检测延迟 = 一个周期）
-#       threshold: 80             # 利用率阈值（百分比），默认 70
-#       silence-period: 600       # 可选冷却期（秒）：持续积压时最多每 N 秒告警一次；不配 = 每周期告警一次
 dynamic-batch:
   notify:
     platforms:
@@ -69,8 +63,4 @@ dynamic-batch:
       - type: offer_failed
         silence-period: 30       # 静默期（秒），30 秒内不再重复发送
       - type: flush_failed
-        silence-period: 30
-      - type: queue_blocked
-        interval-seconds: 5
-        threshold: 80
         silence-period: 30

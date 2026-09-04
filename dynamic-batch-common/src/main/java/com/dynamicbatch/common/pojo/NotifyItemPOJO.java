@@ -6,7 +6,7 @@ package com.dynamicbatch.common.pojo;
  * <p>描述"一种通知类型"的告警规则：对应 yml
  * {@code dynamic-batch.notify.notify-items} 中每一条配置。
  * {@code silencePeriod} 对所有类型生效（事件型告警防刷屏）；{@code threshold} 与
- * {@code intervalSeconds} 仅检测型告警（queue_blocked）读取，其他类型配置了也不读取、不校验。
+ * {@code intervalSeconds} 供检测型告警读取（事件型告警配置了也不读取、不校验）。
  */
 public class NotifyItemPOJO {
 
@@ -16,10 +16,10 @@ public class NotifyItemPOJO {
     /** 静默期秒数，上次发送后 N 秒内不再发送同类通知；0 表示不限流 */
     private long silencePeriod = 0;
 
-    /** 阈值（百分比），仅 queue_blocked 使用：队列利用率 ≥ 此值触发积压告警；未配置默认 70 */
+    /** 阈值（百分比），检测型告警使用：检测指标达到此值触发告警；未配置默认 70 */
     private Integer threshold;
 
-    /** 定时检查周期秒，仅 queue_blocked 使用：定时任务按此周期遍历所有 worker 队列；未配置默认 60 */
+    /** 检测周期秒，检测型告警使用：定时任务按此周期巡检；未配置默认 60 */
     private Integer intervalSeconds;
 
     public String getType() {

@@ -15,8 +15,6 @@ public class BatchWorkerConstant {
     public static final int DEFAULT_BATCH_SIZE = 50;
     /** 最大等待毫秒默认值 */
     public static final long DEFAULT_MAX_WAIT_MS = 1000;
-    /** 入队超时毫秒默认值 */
-    public static final long DEFAULT_OFFER_TIMEOUT_MS = 100;
     /** Worker 组默认分区数：每分区一个队列 + 单线程消费者 */
     public static final int DEFAULT_PARTITION_COUNT = 1;
     /** 暂停/恢复后每隔多久检查一次相位是否已从「待状态」切换到「已状态」（毫秒） */

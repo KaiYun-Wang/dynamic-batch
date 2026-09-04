@@ -15,9 +15,9 @@ import org.springframework.core.env.Environment;
  *
  * <p>用户只需在 yml 配置 {@code dynamic-batch.notify.platforms}，即可通过
  * NotifyService 发送通知（当前内置渠道：钉钉、企业微信）；启动时把平台配置
- * 注入核心 {@link NotifyManager}，配置热更新（BatchProcessor.refresh）会自动通知。
- * 同时从 {@link Environment} 读取实例信息（应用名、端口）初始化 {@link AppInstance}，
- * 确保分布式场景下通知内容可区分实例。
+ * 与告警规则（静默期）注入核心 {@link NotifyManager}，内置告警
+ * （offer_failed / flush_failed）触发即发。同时从 {@link Environment} 读取实例信息
+ * （应用名、端口）初始化 {@link AppInstance}，确保分布式场景下通知内容可区分实例。
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(NotifyProperties.class)
