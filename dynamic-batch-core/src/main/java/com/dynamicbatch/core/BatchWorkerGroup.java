@@ -179,7 +179,8 @@ public class BatchWorkerGroup<T> {
             return false;
         }
         // 类型校验（fail fast）：错误类型的数据在业务线程就拒绝，避免落盘后才暴露；
-        // Worker.submit 保留同款校验，作为反序列化后数据的最后防线（序列化器 bug 场景）
+        // Worker.submit 保留同款校验，作为反序列化后数据的最后防线
+        // （序列化器 bug / 升级后旧数据不兼容，命中即毒丸丢弃，见 Worker 侧注释）
         if (!type.isInstance(data)) {
             log.error("[{}] submit rejected, type mismatch: expected={}, got={}",
                     key, type.getName(), data == null ? "null" : data.getClass().getName());
@@ -207,19 +208,20 @@ public class BatchWorkerGroup<T> {
         }
     }
 
-    /** 分发线程投递入口：按 routingKey 路由到固定分区并入队（Dispatcher 接线 {@code this::submitWorker}） */
+    /** 分发线程投递入口：按 routingKey 路由到固定分区并阻塞投递（Dispatcher 接线 {@code this::submitWorker}） */
     boolean submitWorker(String routingKey, T data) {
         List<BatchWorker<T>> snapshot = partitions;   // 局部快照：size 与 get 必然同代，替换中间态不可见
         return snapshot.get(Math.floorMod(routingKey.hashCode(), snapshot.size())).submit(data);
     }
 
     /**
-     * 优雅关闭：先停分发线程（已 poll 条目投递成功才退），再关闭全部分区
+     * 优雅关闭：先停分发线程（已 poll 条目终结才退：阻塞投递成功，或强制关闭中断
+     * 丢弃在途条目），再关闭全部分区
      * （每个分区：等消费线程自然退出 → 超时强制中断 → 排空剩余数据刷盘），最后关 Spool。
      *
      * <p>关闭顺序与启动相反（Dispatcher → Workers → Spool），下一环等上一环彻底关闭：
-     * Dispatcher 停止后 Worker 仍接收投递（在途条目不丢）；Spool close 排空暂存落盘并
-     * 释放目录锁。磁盘上未消费的数据不删除，下次同目录启动续读。
+     * Dispatcher 停止后 Worker 仍接收投递（在途条目不丢，队列内数据由 flushRemaining 兜底）；
+     * Spool close 排空暂存落盘并释放目录锁。磁盘上未消费的数据不删除，下次同目录启动续读。
      * 未启动的组无任何资源（spool/dispatcher 均为 null），直接返回。
      */
     public synchronized void shutdown() {
@@ -228,9 +230,9 @@ public class BatchWorkerGroup<T> {
             return;
         }
         running = false;
-        // 关闭顺序与启动相反（Dispatcher → Workers → Spool）：先停分发线程（已 poll 条目
-        // 投递成功才退，此时 Worker 仍在接收），再关分区（等自然退出 → 超时中断 → flushRemaining），
-        // 最后关 Spool（排空暂存落盘 + 释放目录锁）；漏掉任一环都会导致 Dispatcher 泄漏重试或锁不释放
+        // 关闭顺序与启动相反（Dispatcher → Workers → Spool）：先停分发线程（阻塞投递终结
+        // 才退：成功入队或强制关闭中断丢在途），再关分区（等自然退出 → 超时中断 → flushRemaining），
+        // 最后关 Spool（排空暂存落盘 + 释放目录锁）；漏掉任一环都会导致 Dispatcher 泄漏阻塞或锁不释放
         dispatcher.stop();
         for (BatchWorker<T> worker : partitions) {
             worker.shutdown();

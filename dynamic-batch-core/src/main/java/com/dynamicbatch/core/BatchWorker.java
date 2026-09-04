@@ -2,7 +2,6 @@ package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
-import com.dynamicbatch.common.queue.VariableLinkedBlockingQueue;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -32,7 +32,7 @@ public class BatchWorker<T> {
     private String name;
     /** 数据类型，submit 时做运行时校验（fail fast），避免错误类型混入队列 */
     private final Class<T> type;
-    private final VariableLinkedBlockingQueue<T> queue;
+    private final LinkedBlockingQueue<T> queue;
     /** 组共享配置（与 BatchWorkerGroup 同一实例），构建期锁定 */
     private final BatchWorkerGroupConfigPOJO config;
     private final Consumer<List<T>> flushCallback;
@@ -52,7 +52,7 @@ public class BatchWorker<T> {
                  BatchWorkerGroupConfigPOJO config) {
         validateConfig(config);
         this.type = Objects.requireNonNull(type, "type must not be null");
-        this.queue = new VariableLinkedBlockingQueue<>(config.getQueueCapacity());
+        this.queue = new LinkedBlockingQueue<>(config.getQueueCapacity());
         this.flushCallback = Objects.requireNonNull(flushCallback, "flushCallback must not be null");
         this.failureHandler = failureHandler;
         this.config = config;
@@ -82,6 +82,15 @@ public class BatchWorker<T> {
         return queue.size();
     }
 
+    /**
+     * 投递一条数据到内存队列：队列满时阻塞等待空位，有位即投。
+     * 生产链路由 Dispatcher 调用，业务方一般不直接使用。
+     *
+     * <p>返回 true = 本条已终结（入队成功，或类型不匹配毒丸已丢弃），投递方可继续下一条；
+     * false = 本条未投递（worker 已关闭，或强制关闭中断打断阻塞 put，在途条目丢弃）。
+     *
+     * @return true 本条已终结；false 未投递，投递方应结束
+     */
     public boolean submit(T data) {
         // 已关闭则直接拒绝：避免「返回 true 但数据入队后无人消费」的静默丢失
         if (!running) {
@@ -89,25 +98,21 @@ public class BatchWorker<T> {
             NotifyManager.getInstance().tryNoticeOfferFailedAsync(name, "worker 已关闭", queue.size());
             return false;
         }
-        // 类型校验（fail fast）：错误类型的数据在业务线程就拒绝，
-        // 否则会混入队列，直到消费端 flush 时整批抛 ClassCastException
-        // 注：isInstance(null) 为 false，null 数据也会被拒绝
+        // 毒丸丢弃：错误类型重试无意义，error 留痕后丢弃、继续下一条；
+        // 不发运维告警（内部防线，业务入口已校验过类型）
         if (!type.isInstance(data)) {
-            log.error("[{}] submit rejected, type mismatch: expected={}, got={}",
+            log.error("[{}] poison entry dropped, type mismatch: expected={}, got={}",
                     name, type.getName(), data == null ? "null" : data.getClass().getName());
-            NotifyManager.getInstance().tryNoticeOfferFailedAsync(name,
-                    "类型不匹配: expected=" + type.getName() + ", got=" + (data == null ? "null" : data.getClass().getName()),
-                    queue.size());
+            return true;
+        }
+        try {
+            queue.put(data);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("[{}] put interrupted, entry dropped on forced shutdown", name);
             return false;
         }
-        // 非阻塞入队：队列满立即返回 false，由投递方（Dispatcher）短睡重试背压；
-        // 队列满是链路中间的正常背压（数据仍在磁盘缓冲，一条不丢），不上报告警；
-        // 背压期间重试方每轮都会走到这里，打 debug 防止刷屏
-        if (!queue.offer(data)) {
-            log.debug("[{}] queue full, entry rejected for backpressure retry", name);
-            return false;
-        }
-        return true;
     }
 
     private void consumeLoop() {

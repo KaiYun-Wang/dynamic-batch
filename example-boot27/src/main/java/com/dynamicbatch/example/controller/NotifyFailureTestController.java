@@ -5,6 +5,7 @@ import com.dynamicbatch.core.BatchWorker;
 import com.dynamicbatch.core.BatchWorkerGroup;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import com.dynamicbatch.example.config.BatchProcessorConfiguration;
+import com.dynamicbatch.spool.Serializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -12,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.annotation.PostConstruct;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -23,10 +25,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>填好 application.yml 中的 dynamic-batch.notify.platforms 后启动：
  * <pre>
- * curl -X POST "http://localhost:8080/fail-test/offer-full"           # 队列满背压：仅 debug 日志，不上报告警（告警收敛后）
- * curl -X POST "http://localhost:8080/fail-test/offer-type-mismatch"  # 入队失败：类型不匹配
- * curl -X POST "http://localhost:8080/fail-test/offer-stopped"        # 入队失败：worker 已关闭
- * curl -X POST "http://localhost:8080/fail-test/offer-spool-full"     # 入队失败：spool 磁盘预算满
+ * curl -X POST "http://localhost:8080/fail-test/offer-full"           # 队列满阻塞背压：submit 阻塞等待空位，无告警（正常背压）
+ * curl -X POST "http://localhost:8080/fail-test/offer-type-mismatch"  # 入队失败：类型不匹配（业务入口拦截，告警）
+ * curl -X POST "http://localhost:8080/fail-test/offer-stopped"        # 入队失败：worker 已关闭（告警）
+ * curl -X POST "http://localhost:8080/fail-test/offer-spool-full"     # 入队失败：spool 磁盘预算满（告警）
+ * curl -X POST "http://localhost:8080/fail-test/offer-poison"         # 毒丸丢弃：反序列化类型错配，error 日志丢弃，无告警，链路继续
  * curl -X POST "http://localhost:8080/fail-test/flush-error"          # 批次失败：failureHandler 接管
  * curl -X POST "http://localhost:8080/fail-test/flush-error-loss"     # 批次失败：数据丢失风险
  * </pre>
@@ -43,6 +46,9 @@ public class NotifyFailureTestController {
 
     /** Spool 预算打满演示组：maxSizeBytes 16MB 低于 Chronicle 初始块（~80MB），首块落盘即超预算，后续 submit 全部被拒 */
     private static final String SPOOL_FULL_GROUP = "spool_full_demo";
+
+    /** 毒丸演示组：毒丸序列化器使 poison: 开头的 payload 反序列化后类型错配 */
+    private static final String POISON_GROUP = "poison_demo";
 
     private final BatchProcessor batchProcessor;
 
@@ -81,6 +87,23 @@ public class NotifyFailureTestController {
         }
     }
 
+    /** 注册毒丸演示组：毒丸序列化器模拟「写进去读出来类型不一样」（序列化器 bug 场景） */
+    @PostConstruct
+    public void registerPoisonDemoGroup() {
+        try {
+            batchProcessor.registerGroup(POISON_GROUP,
+                    BatchWorkerGroup.builder(String.class,
+                                    SpoolConfigPOJO.builder("spool-demo-poison")
+                                            .serializer(new PoisonSerializer())
+                                            .build(),
+                                    batch -> { })
+                            .build());
+            log.info("poison_demo 组已注册（毒丸序列化器）");
+        } catch (IllegalStateException e) {
+            log.warn("poison_demo 组已存在, 跳过注册: {}", e.getMessage());
+        }
+    }
+
     /** 构造一个消费极慢的 worker 并启动：flush 睡 2s，队列容量 10，保证提交必满 */
     private static BatchWorker<String> buildSlowConsumerWorker() {
         BatchWorker<String> worker = BatchWorker.builder(String.class, batch -> {
@@ -116,9 +139,11 @@ public class NotifyFailureTestController {
     }
 
     /**
-     * 队列满背压演示：队列满是链路中间的正常背压（数据还在磁盘缓冲），不上报告警，仅 debug 日志。
+     * 队列满阻塞背压演示：队列满是下游 flush 慢的正常背压，submit 阻塞等待空位，
+     * 数据不拒绝不丢失，不上报告警。
      * 8 线程并发向容量 10、flush 睡 2s 的慢消费 worker 灌 200 条：
-     * 消费线程卡在 flush 里，队列瞬间打满，submit 返回 false。
+     * 消费线程卡在 flush 里，队列打满后 submit 阻塞等待空位，最终全部投递完成
+     * （总耗时取决于消费速率，端点可能等到超时返回）。
      */
     @PostMapping("/offer-full")
     public String offerFull() throws InterruptedException {
@@ -149,8 +174,8 @@ public class NotifyFailureTestController {
         startLatch.countDown();
         pool.shutdown();
         pool.awaitTermination(30, TimeUnit.SECONDS);
-        return "并发提交完成：成功=" + ok.get() + "，队列满背压拒绝=" + failed.get()
-                + "（队列满是正常背压不上报告警，仅 debug 日志；当前队列剩余=" + slowConsumerWorker.getQueueSize() + "）";
+        return "并发提交完成：投递成功=" + ok.get() + "，拒绝=" + failed.get()
+                + "（队列满是正常背压：submit 阻塞等待空位，不上报告警；当前队列剩余=" + slowConsumerWorker.getQueueSize() + "）";
     }
 
     /** 入队失败：类型不匹配（向 DemoItem worker 组提交 String） */
@@ -165,6 +190,20 @@ public class NotifyFailureTestController {
     public String offerStopped() {
         boolean ok = stoppedWorker.submit("data");
         return "提交返回=" + ok + "（应为 false，已触发 worker 已关闭告警）";
+    }
+
+    /**
+     * 毒丸丢弃演示：向毒丸演示组提交 1 条毒数据（读出类型错配）+ 2 条健康数据（同一 routingKey 同分区）。
+     * 毒丸在 Worker 侧被 error 日志丢弃（内部防线，不发告警），健康数据照常 flush，链路不堵。
+     */
+    @PostMapping("/offer-poison")
+    public String offerPoison() throws InterruptedException {
+        batchProcessor.submit(POISON_GROUP, "k1", "poison:abc");
+        batchProcessor.submit(POISON_GROUP, "k1", "healthy:1");
+        batchProcessor.submit(POISON_GROUP, "k1", "healthy:2");
+        Thread.sleep(1500);   // 等搬运与消费
+        return "已提交 1 条毒丸 + 2 条健康数据（同一 routingKey 同分区）："
+                + "毒丸应见 error 日志 poison entry dropped（无告警），健康数据照常 flush，链路不堵";
     }
 
     /**
@@ -200,5 +239,27 @@ public class NotifyFailureTestController {
         flushFailLossWorker.submit("b"); // 攒满 2 条立即 flush → 抛异常 → 无兜底
         Thread.sleep(1500);
         return "已触发 flush 失败（无 failureHandler，数据丢失风险），查看钉钉/日志";
+    }
+
+    /**
+     * 毒丸序列化器（raw type 实现）：payload 以 "poison:" 开头时反序列化返回 Integer
+     * （泛型擦除下堆上真实类型 Integer 谎报为 String），其余正常返回 String。
+     * Worker 侧类型校验拦截后丢弃（error 日志，无告警）。
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static final class PoisonSerializer implements Serializer {
+        @Override
+        public byte[] serialize(Object data) {
+            return ((String) data).getBytes(StandardCharsets.UTF_8);
+        }
+
+        @Override
+        public Object deserialize(byte[] bytes, Class type) {
+            String s = new String(bytes, StandardCharsets.UTF_8);
+            if (s.startsWith("poison:")) {
+                return Integer.valueOf(s.length());
+            }
+            return s;
+        }
     }
 }

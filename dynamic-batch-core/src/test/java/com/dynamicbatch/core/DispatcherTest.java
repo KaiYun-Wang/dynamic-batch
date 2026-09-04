@@ -5,6 +5,8 @@ import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,22 +53,26 @@ public class DispatcherTest {
         assertEquals("k3", deliveredKeys.get(2));
     }
 
+    /**
+     * deliver 返回 false（投递被放弃：worker 已关闭 / 阻塞投递被中断）时，线程应随即退出。
+     */
     @Test
-    public void queueFullRetriesUntilSuccess() throws Exception {
-        AtomicInteger deliverAttempts = new AtomicInteger();
-        SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("retry-key", "retry-value");
+    public void deliverAbandonedExitsThread() throws Exception {
+        SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("stuck-key", "stuck-value");
         AtomicBoolean polled = new AtomicBoolean();
 
         Dispatcher<String> dispatcher = new Dispatcher<>(
                 lockTimeoutMs -> polled.compareAndSet(false, true) ? entry : null,
-                (routingKey, payload) -> deliverAttempts.incrementAndGet() >= 4);
+                (routingKey, payload) -> false);
 
-        dispatcher.setName("test-retry");
+        dispatcher.setName("test-abandon");
         dispatcher.start();
-        Thread.sleep(500);
-        dispatcher.stop();
 
-        assertTrue("应重试直到成功", deliverAttempts.get() >= 4);
+        Thread dispatcherThread = findDispatcherThread("test-abandon");
+        assertTrue(dispatcherThread != null && dispatcherThread.isAlive());
+        dispatcherThread.join(2000);
+        assertFalse("投递被放弃后线程应结束", dispatcherThread.isAlive());
+        dispatcher.stop();
     }
 
     @Test
@@ -149,24 +155,37 @@ public class DispatcherTest {
         assertEquals("after-corrupt", delivered.get(0));
     }
 
+    /**
+     * 阻塞投递被中断（强制关闭）：deliver 丢本条返回 false，线程结束。
+     */
     @Test
-    public void interruptDuringRetryDropsEntryAndExits() throws Exception {
+    public void interruptDuringBlockingDeliverExitsThread() throws Exception {
         SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("stuck-key", "stuck-value");
         AtomicBoolean polled = new AtomicBoolean();
+        CountDownLatch deliverStarted = new CountDownLatch(1);
 
         Dispatcher<String> dispatcher = new Dispatcher<>(
                 lockTimeoutMs -> polled.compareAndSet(false, true) ? entry : null,
-                (routingKey, payload) -> false);
+                (routingKey, payload) -> {
+                    deliverStarted.countDown();
+                    try {
+                        new CountDownLatch(1).await();   // 模拟阻塞 put（永不放行）
+                        return true;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return false;   // 阻塞投递被中断：丢本条，返回 false
+                    }
+                });
 
-        dispatcher.setName("test-interrupt");
+        dispatcher.setName("test-interrupt-put");
         dispatcher.start();
-        Thread.sleep(300);
+        assertTrue(deliverStarted.await(2, TimeUnit.SECONDS));
 
-        Thread dispatcherThread = findDispatcherThread("test-interrupt");
+        Thread dispatcherThread = findDispatcherThread("test-interrupt-put");
         assertTrue(dispatcherThread != null && dispatcherThread.isAlive());
         dispatcherThread.interrupt();
 
-        dispatcherThread.join(1000);
+        dispatcherThread.join(2000);
         assertFalse(dispatcherThread.isAlive());
         dispatcher.stop();
     }

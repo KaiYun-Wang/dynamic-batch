@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
 
 /**
- * Group 的分发线程：从 Spool poll 一条 → 投递到 Worker 队列，背压时短睡重试。
+ * Group 的分发线程：从 Spool poll 一条 → 阻塞投递到 Worker 队列 → 循环。
  *
  * <p>数据链路位置：{@code Spool(磁盘)} → <b>Dispatcher</b> → {@code Worker 内存队列} → flushCallback。
  * 由 {@link BatchWorkerGroup} 创建并编排启停。
@@ -19,16 +19,17 @@ import java.util.function.BiPredicate;
  * <p>不拥有路由逻辑（路由在 {@link #deliver} 的实现，通常为 Group 私有 {@code submitWorker} 的
  * {@code hash(routingKey) % partitions.size()}）。
  *
- * <p>背压语义：{@code deliver} 返回 false 为正常背压，短睡重试无上限、不丢消息；
- * 已 poll 的条目在 {@link #deliverUntilSuccess} 中不看 {@code running}，必须投递成功才离开
- * （关闭顺序为先 Dispatcher 后 Worker，关闭时 Worker 仍可接收投递）。
+ * <p>投递为阻塞 put，队列满时在 {@code deliver} 内部等待空位；已 poll 的条目必须终结
+ * （入队成功或毒丸丢弃）才离开，不看 {@code running}（关闭顺序为先 Dispatcher 后 Worker，
+ * 关闭时 Worker 仍可接收投递）；仅当投递被放弃（强制关闭中断 / worker 已关闭）时结束线程。
  *
- * <p>毒消息：poll 后反序列化/帧损坏抛异常 → 读位置已推进，打 error 日志后丢弃，继续循环。
+ * <p>毒消息两层防线：poll 后反序列化/帧损坏抛异常 → 读位置已推进，打 error 日志后丢弃；
+ * 投递时类型不匹配 → {@code deliver} 内部 error 丢弃，均继续循环。
  *
- * <p>中断临时约定：投递重试中 sleep 被 interrupt →
- * warn 含 entry 摘要后丢弃本条并结束线程；空轮 sleep 被 interrupt → 恢复中断标志并结束线程。
+ * <p>中断约定：阻塞投递被 interrupt（强制关闭）→ {@code deliver} 内部丢本条返回 false，
+ * 本线程 warn 后结束；空轮 sleep 被 interrupt → 恢复中断标志并结束线程。
  *
- * <p>暂停检查在循环顶部（两条消息之间生效）：PAUSED 时不取数，本条投递成功才确认暂停。
+ * <p>暂停检查在循环顶部（两条消息之间生效）：PAUSED 时不取数，本条终结后才确认暂停。
  * 暂停/恢复为异步意图：置相位后立即返回，终态由线程自行确认，相位状态机是本类私有实现。
  */
 class Dispatcher<T> {
@@ -38,7 +39,7 @@ class Dispatcher<T> {
     /** poll 时传给 Spool 的读锁获取超时（毫秒）；Chronicle 清理文件持锁冲突时抛 {@link TimeoutException}，按本次空轮处理 */
     private static final long POLL_LOCK_TIMEOUT_MS = 100L;
 
-    /** Spool 空轮等待与 Worker 队列满时的背压重试睡眠间隔，与 Worker 轮询间隔同源，禁止忙等 */
+    /** Spool 空轮与暂停相位的循环睡眠间隔，与 Worker 轮询间隔同源，禁止忙等 */
     private static final long LOOP_SLEEP_MS = BatchWorkerConstant.WAKEUP_INTERVAL_MS;
 
     /**
@@ -60,16 +61,17 @@ class Dispatcher<T> {
     private final Poller<T> poller;
 
     /**
-     * 投递函数：将 routingKey + payload 投入 Worker 分区队列，
+     * 投递函数：将 routingKey + payload 投入 Worker 分区队列（阻塞 put），
      * 生产接线为 Group 的 {@code submitWorker}。
-     * 返回 true = 入队成功；false = Worker 队列满（正常背压，触发重试）。
+     * 返回 true = 本条已终结（入队成功或毒丸丢弃）；false = 本条未投递
+     * （worker 已关闭 / 强制关闭中断），调用方应结束线程。
      */
     private final BiPredicate<String, T> deliver;
 
     /** 分发线程运行标志，{@code false} 时外层 {@link #dispatchLoop} 退出 */
     private volatile boolean running;
 
-    /** 调度器暂停状态机相位：两段式——协调方写意图（*_PENDING），线程在循环顶部确认翻终态（PAUSED/RUNNING） */
+    /** 调度器暂停状态机相位：两段式——协调方写意图（*_PENDING），线程在循环顶部确认终态（PAUSED/RUNNING） */
     public enum PausePhase {
         /** 已运行 */
         RUNNING,
@@ -92,7 +94,7 @@ class Dispatcher<T> {
 
     /**
      * @param poller  从 Spool 取条的函数（测试用 lambda，生产为 {@code spool::poll}）
-     * @param deliver 投到 Worker 的函数（测试用 lambda，生产为 {@code this::submitWorker}）
+     * @param deliver 阻塞投到 Worker 的函数（测试用 lambda，生产为 {@code this::submitWorker}）
      */
     Dispatcher(Poller<T> poller, BiPredicate<String, T> deliver) {
         this.poller = Objects.requireNonNull(poller, "poller must not be null");
@@ -172,7 +174,7 @@ class Dispatcher<T> {
 
     /**
      * 分发主循环（在独立线程中运行）：
-     * poll 一条 → 非空则投递成功为止 → 空则短睡 → 重复。
+     * poll 一条 → 非空则投递 → 空则短睡 → 重复。
      * <p>异常分支：锁超时 continue；反序列化失败 error 后 continue；空轮 sleep。
      */
     private void dispatchLoop() {
@@ -215,27 +217,18 @@ class Dispatcher<T> {
                 continue;
             }
 
-            deliverUntilSuccess(entry);
+            deliverEntry(entry);
         }
     }
 
     /**
-     * 内层投递循环：已 poll 的条目必须投成功才返回，不看 {@code running}。
-     * <p>{@code deliver} 返回 false 时短睡重试（背压）；sleep 被 interrupt 时 warn 丢本条并置 {@code running=false} 结束线程。
+     * 投递一条已 poll 的条目：返回 false 表示本条未投递（强制关闭中断 / worker 已关闭），
+     * warn 含 entry 摘要后置 {@code running=false} 结束线程。
      */
-    private void deliverUntilSuccess(SpoolEntryPOJO<T> entry) {
-        while (true) {
-            if (deliver.test(entry.getRoutingKey(), entry.getPayload())) {
-                return;
-            }
-            try {
-                Thread.sleep(LOOP_SLEEP_MS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.warn("[{}] deliver interrupted, dropping entry on forced shutdown: {}", name, entry);
-                running = false;
-                return;
-            }
+    private void deliverEntry(SpoolEntryPOJO<T> entry) {
+        if (!deliver.test(entry.getRoutingKey(), entry.getPayload())) {
+            log.warn("[{}] deliver abandoned, dropping entry on shutdown: {}", name, entry);
+            running = false;
         }
     }
 }
