@@ -7,7 +7,6 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -15,11 +14,15 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+/**
+ * 分区数热更新端到端集成测试：三步编排（暂停调度器 → 改变分区数 → 恢复调度器），每步各自原子。
+ */
 public class GroupResizeIntegrationTest {
 
     @Rule
@@ -39,6 +42,30 @@ public class GroupResizeIntegrationTest {
         }
     }
 
+    /** 轮询等待谓词成立（终态断言，超时即红） */
+    private static void awaitTrue(Supplier<Boolean> predicate, long timeoutMs, String message)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (!predicate.get()) {
+            if (System.currentTimeMillis() > deadline) {
+                fail(message);
+            }
+            Thread.sleep(20);
+        }
+    }
+
+    /** 运行时调整编排（finally 恢复，避免失败把组留在暂停态） */
+    private void runHeatUpdate(String key, int newSize) throws Exception {
+        processor.pauseDispatcher(key);
+        awaitTrue(() -> processor.getDispatcherPhase(key) == Dispatcher.PausePhase.PAUSED,
+                5_000, "暂停应在调度器确认后生效");
+        try {
+            processor.resizePartitions(key, newSize, 10_000);
+        } finally {
+            processor.resumeDispatcher(key);
+        }
+    }
+
     @After
     public void tearDown() {
         if (processor != null) {
@@ -46,7 +73,8 @@ public class GroupResizeIntegrationTest {
         }
     }
 
-    @Test
+    /** 扩容 1→4：同一 routingKey 跨热更新边界仍严格有序，全量对账 */
+    @Test(timeout = 90_000)
     public void expandPartitionsPreservesOrderPerKey() throws Exception {
         processor = new BatchProcessor();
         List<Integer> flushed = new CopyOnWriteArrayList<>();
@@ -64,7 +92,7 @@ public class GroupResizeIntegrationTest {
         }
         awaitFlushed(50, flushed, 10_000);
 
-        processor.resizeGroup("resize-expand", 4, 30_000);
+        runHeatUpdate("resize-expand", 4);
         assertEquals(4, group.getPartitionCount());
 
         for (int i = 100; i < 200; i++) {
@@ -79,7 +107,8 @@ public class GroupResizeIntegrationTest {
         assertEquals(expected, new ArrayList<>(flushed));
     }
 
-    @Test
+    /** 缩容 4→2：存量与热更新期间的数据全部消化，一条不丢 */
+    @Test(timeout = 90_000)
     public void shrinkPartitionsNoDataLoss() throws Exception {
         processor = new BatchProcessor();
         List<Integer> flushed = new CopyOnWriteArrayList<>();
@@ -101,15 +130,19 @@ public class GroupResizeIntegrationTest {
             }
         }
 
-        processor.resizeGroup("resize-shrink", 2, 30_000);
+        runHeatUpdate("resize-shrink", 2);
         assertEquals(2, group.getPartitionCount());
 
         awaitFlushed(accepted, flushed, 30_000);
         assertEquals(accepted, flushed.size());
     }
 
-    @Test(timeout = 20_000)
-    public void resizeTimeoutRollsBackExpand() throws Exception {
+    /**
+     * 排空超时：Worker 手头批次卡在慢回调，预算耗尽抛 TimeoutException；
+     * 分区数不变（失败发生在变更前，即无效果），恢复后组继续消化完存量（自愈）。
+     */
+    @Test(timeout = 90_000)
+    public void resizePartitionsTimeoutKeepsTopology() throws Exception {
         processor = new BatchProcessor();
         CountDownLatch firstFlushStarted = new CountDownLatch(1);
         CountDownLatch releaseFlush = new CountDownLatch(1);
@@ -136,105 +169,113 @@ public class GroupResizeIntegrationTest {
         for (int i = 0; i < 100; i++) {
             processor.submit("resize-timeout", "k", i);
         }
-        assertTrue(firstFlushStarted.await(5, TimeUnit.SECONDS));
+        assertTrue("首批 flush 应已开始并卡在回调内", firstFlushStarted.await(5, TimeUnit.SECONDS));
 
+        processor.pauseDispatcher("resize-timeout");
+        awaitTrue(() -> processor.getDispatcherPhase("resize-timeout") == Dispatcher.PausePhase.PAUSED,
+                5_000, "暂停应在调度器确认后生效");
         try {
-            processor.resizeGroup("resize-timeout", 4, 500);
+            processor.resizePartitions("resize-timeout", 4, 500);
             fail("expected TimeoutException");
         } catch (TimeoutException expected) {
-            // 扩容应回滚
+            // 排空等待超时：未动分区
         }
-        assertEquals(1, group.getPartitionCount());
+        assertEquals("失败即无效果，分区数不变", 1, group.getPartitionCount());
         releaseFlush.countDown();
 
-        awaitFlushed(100, flushed, 15_000);
+        processor.resumeDispatcher("resize-timeout");
+        awaitFlushed(100, flushed, 30_000);
         assertEquals(100, flushed.size());
     }
 
-    @Test(timeout = 30_000)
-    public void resizeFailureRollsBackShrink() throws Exception {
+    /** 前置检查：调度器未暂停时改变分区数直接拒绝 */
+    @Test
+    public void resizePartitionsRequiresPausedDispatcher() throws Exception {
         processor = new BatchProcessor();
-        Thread testThread = Thread.currentThread();
-        CountDownLatch drainStarted = new CountDownLatch(1);
-        List<Integer> flushed = new CopyOnWriteArrayList<>();
         BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
-                        SpoolConfigPOJO.builder(new File(temp.getRoot(), "resize-shrink-rollback").getAbsolutePath())
-                                .flushIntervalMs(20)
-                                .build(),
-                        batch -> {
-                            flushed.addAll(batch);
-                            // pauseAll 的排空（drain）在 resize 调用线程同步执行：
-                            // 回调运行在调用线程即说明已进入 drain 窗口（缩容摘除前）
-                            if (Thread.currentThread() == testThread) {
-                                drainStarted.countDown();
-                            }
-                            // 攒批节奏放缓，拉长 drain 窗口，给 kill 线程留足时间
-                            try {
-                                Thread.sleep(100);
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                            }
-                        })
-                .partitionCount(4)
-                .batchSize(10)
-                .maxWaitMs(100)
+                        spoolConfig(new File(temp.getRoot(), "resize-require-pause")),
+                        batch -> { })
+                .partitionCount(2)
                 .build();
-        processor.registerGroup("resize-shrink-rollback", group);
-
-        // 先提交一批并等到有产出：确认 spool→dispatcher→worker 链路已通，
-        // 之后的提交才会及时进入 Worker 队列（否则 spool 落盘延迟会让 dispatcher 先暂停）
-        int accepted = 0;
-        for (int i = 0; i < 100; i++) {
-            if (processor.submit("resize-shrink-rollback", "k" + (i % 4), i)) {
-                accepted++;
-            }
-        }
-        awaitFlushed(20, flushed, 10_000);
-
-        // resize 前锁定幸存分区 worker-0 的消费线程引用（缩容只摘尾部，0 号必幸存）
-        Field partitionsField = BatchWorkerGroup.class.getDeclaredField("partitions");
-        partitionsField.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        List<BatchWorker<Integer>> partitions = (List<BatchWorker<Integer>>) partitionsField.get(group);
-        Field consumerThreadField = BatchWorker.class.getDeclaredField("consumerThread");
-        consumerThreadField.setAccessible(true);
-        Thread survivor0 = (Thread) consumerThreadField.get(partitions.get(0));
-
-        // drain 开始后杀死幸存分区 worker-0 的消费线程（此时整组已 PAUSED，线程在暂停睡眠中）：
-        // 线程死后 phase 永远停在 PAUSED，resumeAll 等它 RUNNING 必然超时，
-        // 制造「暂停成功、缩容已摘除、恢复失败」的失败场景
-        Thread killer = new Thread(() -> {
-            try {
-                if (!drainStarted.await(10, TimeUnit.SECONDS)) {
-                    return;
-                }
-                survivor0.interrupt();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        killer.start();
-
-        // 再提交一批制造队列积压（drain 窗口），随后立刻缩容
-        for (int i = 100; i < 300; i++) {
-            if (processor.submit("resize-shrink-rollback", "k" + (i % 4), i)) {
-                accepted++;
-            }
-        }
+        processor.registerGroup("resize-require-pause", group);
         try {
-            processor.resizeGroup("resize-shrink-rollback", 2, 6_000);
-            fail("expected TimeoutException");
-        } catch (TimeoutException expected) {
-            // 缩容应回滚
+            processor.resizePartitions("resize-require-pause", 4, 1_000);
+            fail("expected IllegalStateException");
+        } catch (IllegalStateException expected) {
+            // 未暂停，fail fast
         }
-        killer.join(1_000);
-
-        // 分区数回滚到缩容前
-        assertEquals(4, group.getPartitionCount());
     }
 
-    @Test(timeout = 20_000)
-    public void resizeConcurrentSubmit() throws Exception {
+    /** 幂等：同尺寸变更直接返回（须先暂停） */
+    @Test(timeout = 30_000)
+    public void resizeSameSizeIsNoOp() throws Exception {
+        processor = new BatchProcessor();
+        BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
+                        spoolConfig(new File(temp.getRoot(), "resize-noop")),
+                        batch -> { })
+                .partitionCount(3)
+                .build();
+        processor.registerGroup("resize-noop", group);
+        processor.pauseDispatcher("resize-noop");
+        awaitTrue(() -> processor.getDispatcherPhase("resize-noop") == Dispatcher.PausePhase.PAUSED,
+                5_000, "暂停应在调度器确认后生效");
+        try {
+            processor.resizePartitions("resize-noop", 3, 5_000);
+        } finally {
+            processor.resumeDispatcher("resize-noop");
+        }
+        assertEquals(3, group.getPartitionCount());
+    }
+
+    @Test
+    public void resizeUnknownKeyThrows() throws Exception {
+        processor = new BatchProcessor();
+        try {
+            processor.resizePartitions("nope", 2, 1_000);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException expected) {
+            // fail fast
+        }
+    }
+
+    @Test
+    public void resizeInvalidSizeThrows() throws Exception {
+        processor = new BatchProcessor();
+        BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
+                        spoolConfig(new File(temp.getRoot(), "resize-invalid")),
+                        batch -> { })
+                .partitionCount(2)
+                .build();
+        processor.registerGroup("resize-invalid", group);
+        try {
+            processor.resizePartitions("resize-invalid", 0, 1_000);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException expected) {
+            // fail fast
+        }
+    }
+
+    @Test
+    public void resizeAfterShutdownRejected() throws Exception {
+        BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
+                        spoolConfig(new File(temp.getRoot(), "resize-shutdown")),
+                        batch -> { })
+                .partitionCount(2)
+                .build();
+        processor = new BatchProcessor();
+        processor.registerGroup("resize-shutdown", group);
+        group.shutdown();
+        try {
+            group.resizePartitions(4, 1_000);
+            fail("expected IllegalStateException");
+        } catch (IllegalStateException expected) {
+            // shuttingDown 已置位
+        }
+    }
+
+    /** 并发 submit 不断流时执行三步热更新：全量对账不丢 */
+    @Test(timeout = 90_000)
+    public void heatUpdateConcurrentSubmit() throws Exception {
         processor = new BatchProcessor();
         List<Integer> flushed = new CopyOnWriteArrayList<>();
         BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
@@ -259,70 +300,11 @@ public class GroupResizeIntegrationTest {
         });
         submitter.start();
 
-        processor.resizeGroup("resize-concurrent", 4, 30_000);
+        runHeatUpdate("resize-concurrent", 4);
         submitting.set(false);
         submitter.join(10_000);
 
         awaitFlushed(accepted[0], flushed, 30_000);
         assertEquals(accepted[0], flushed.size());
-    }
-
-    @Test
-    public void resizeSameSizeIsNoOp() throws Exception {
-        processor = new BatchProcessor();
-        BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
-                        spoolConfig(new File(temp.getRoot(), "resize-noop")),
-                        batch -> { })
-                .partitionCount(3)
-                .build();
-        processor.registerGroup("resize-noop", group);
-        processor.resizeGroup("resize-noop", 3, 5_000);
-        assertEquals(3, group.getPartitionCount());
-    }
-
-    @Test
-    public void resizeUnknownKeyThrows() throws TimeoutException {
-        processor = new BatchProcessor();
-        try {
-            processor.resizeGroup("nope", 2, 1_000);
-            fail("expected IllegalArgumentException");
-        } catch (IllegalArgumentException expected) {
-            // fail fast
-        }
-    }
-
-    @Test
-    public void resizeInvalidSizeThrows() throws Exception {
-        processor = new BatchProcessor();
-        BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
-                        spoolConfig(new File(temp.getRoot(), "resize-invalid")),
-                        batch -> { })
-                .partitionCount(2)
-                .build();
-        processor.registerGroup("resize-invalid", group);
-        try {
-            processor.resizeGroup("resize-invalid", 0, 1_000);
-            fail("expected IllegalArgumentException");
-        } catch (IllegalArgumentException expected) {
-            // fail fast
-        }
-    }
-
-    @Test
-    public void resizeAfterShutdownRejected() throws Exception {
-        BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
-                        spoolConfig(new File(temp.getRoot(), "resize-shutdown")),
-                        batch -> { })
-                .partitionCount(2)
-                .build();
-        processor = new BatchProcessor();
-        processor.registerGroup("resize-shutdown", group);
-        group.shutdown();
-        try {
-            group.resize(4, 1_000);
-            fail("expected IllegalStateException");
-        } catch (IllegalStateException expected) {
-            // shuttingDown 已置位
-        }
     }
 }

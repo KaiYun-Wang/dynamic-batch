@@ -1,7 +1,6 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
-import com.dynamicbatch.common.enums.PausePhase;
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
@@ -15,11 +14,11 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 
 /**
  * 批处理 Worker 组：磁盘缓冲 + 分发线程 + 分区 Worker 组的编排者。
@@ -50,8 +49,12 @@ public class BatchWorkerGroup<T> {
     /** 组共享配置：全部分区 Worker 持有同一实例 */
     private final BatchWorkerGroupConfigPOJO config;
 
-    /** 分区列表：序号即分区号，路由目标；分区数 = size() */
-    private final List<BatchWorker<T>> partitions = new ArrayList<>();
+    /**
+     * 分区列表：序号即分区号，路由目标；分区数 = size()。
+     * 引用易变（volatile），分区数变更采用「构建全新列表 + 单步整体替换」，
+     * 读方先取局部快照再取模，永不感知中间态。
+     */
+    private volatile List<BatchWorker<T>> partitions = new ArrayList<>();
 
     private volatile boolean running;
     /** shutdown 入口置 true，resize 入口据此拒绝；与 resize 共用对象锁 */
@@ -73,9 +76,11 @@ public class BatchWorkerGroup<T> {
         this.config = builder.config;
         this.spoolConfig = builder.spoolConfig;
         // 共享同一 config 实例：分区 Worker 不复制配置，组级公共字段经此对象读取
+        List<BatchWorker<T>> initial = new ArrayList<>(builder.partitionCount);
         for (int i = 0; i < builder.partitionCount; i++) {
-            partitions.add(new BatchWorker<>(type, flushCallback, failureHandler, config));
+            initial.add(new BatchWorker<>(type, flushCallback, failureHandler, config));
         }
+        this.partitions = Collections.unmodifiableList(initial);
     }
 
     public void setKey(String key) {
@@ -204,12 +209,8 @@ public class BatchWorkerGroup<T> {
 
     /** 分发线程投递入口：按 routingKey 路由到固定分区并入队（Dispatcher 接线 {@code this::submitWorker}） */
     boolean submitWorker(String routingKey, T data) {
-        return partitions.get(partitionIndex(routingKey)).submit(data);
-    }
-
-    /** 路由：hash 取模；routingKey 不可为 null（Processor 入口 requireNonNull + 落盘条目构造器 fail fast 兜底） */
-    private int partitionIndex(String routingKey) {
-        return Math.floorMod(routingKey.hashCode(), partitions.size());
+        List<BatchWorker<T>> snapshot = partitions;   // 局部快照：size 与 get 必然同代，替换中间态不可见
+        return snapshot.get(Math.floorMod(routingKey.hashCode(), snapshot.size())).submit(data);
     }
 
     /**
@@ -238,181 +239,116 @@ public class BatchWorkerGroup<T> {
         log.info("[{}] worker group stopped", key);
     }
 
-    // ======================== 暂停/恢复 ========================
+    // ======================== 调度器暂停/恢复 ========================
 
     /**
-     * 暂停整组：分发线程停止取数，各 Worker 排空手头批次与队列残留后待命。
-     * 顺序：先分发线程后 Worker；整段共用超时预算，超时自动回滚（整组保持消费）后抛出。
-     * 暂停期间 submit 照常写入 Spool，恢复后自动消化积压。
+     * 暂停调度器：置暂停意图后立即返回，分发线程回到循环顶部即停止取数；
+     * 分区 Worker 自然消化手头批次至队列清空，submit 照常写入 Spool（削峰语义保留），
+     * 恢复后自动消化积压。是否已暂停见 {@link #getDispatcherPhase()}。
      *
-     * @param timeoutMs 整段超时预算（毫秒，含等确认与排空）
      * @throws IllegalStateException 组未启动
-     * @throws TimeoutException      预算内未完成（已自动回滚）
      */
-    void pauseAll(long timeoutMs) throws TimeoutException {
-        if (!running) {
-            throw new IllegalStateException("[" + key + "] group not started");
-        }
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        try {
-            // ① 暂停分发线程并等待确认
-            dispatcher.requestPause();
-            awaitPhase(dispatcher::getPausePhase, PausePhase.PAUSED, deadline, "dispatcher");
-            // ② 暂停全部 Worker 并等待确认
-            for (BatchWorker<T> worker : partitions) {
-                worker.requestPause();
-            }
-            int index = 0;
-            for (BatchWorker<T> worker : partitions) {
-                awaitPhase(worker::getPausePhase, PausePhase.PAUSED, deadline, "worker-" + index++);
-            }
-            // ③ 逐个排空队列残留
-            index = 0;
-            for (BatchWorker<T> worker : partitions) {
-                long remaining = deadline - System.currentTimeMillis();
-                if (remaining <= 0) {
-                    throw new TimeoutException("[" + key + "] pause budget exhausted before drain worker-" + index);
-                }
-                worker.flushRemainingWithTimeout(remaining);
-                index++;
-            }
-        } catch (TimeoutException e) {
-            // 超时回滚：整组置「请恢复」，保持消费
-            dispatcher.requestRun();
-            for (BatchWorker<T> worker : partitions) {
-                worker.requestRun();
-            }
-            log.warn("[{}] pauseAll timed out, rolled back to running", key, e);
-            throw e;
-        }
-        log.info("[{}] worker group paused, partitions={}", key, partitions.size());
+    synchronized void pauseDispatcher() {
+        requireRunning();
+        dispatcher.requestPause();
     }
 
     /**
-     * 恢复整组：各 Worker 恢复运行后分发线程续投。幂等可重试；超时不回滚，可直接重试。
+     * 恢复调度器：置运行意图后立即返回，分发线程自行翻回运行态续投。
      *
-     * @param timeoutMs 整段超时预算（毫秒）
      * @throws IllegalStateException 组未启动
-     * @throws TimeoutException      预算内未全部恢复
      */
-    void resumeAll(long timeoutMs) throws TimeoutException {
-        if (!running) {
-            throw new IllegalStateException("[" + key + "] group not started");
-        }
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        // ① 全部 Worker 置待运行（先全部置、再逐个等）→ 等全部 RUNNING
-        for (BatchWorker<T> worker : partitions) {
-            worker.requestRun();
-        }
-        int index = 0;
-        for (BatchWorker<T> worker : partitions) {
-            awaitPhase(worker::getPausePhase, PausePhase.RUNNING, deadline, "worker-" + index++);
-        }
-        // ② 分发线程置待运行 → 等 RUNNING
+    synchronized void resumeDispatcher() {
+        requireRunning();
         dispatcher.requestRun();
-        awaitPhase(dispatcher::getPausePhase, PausePhase.RUNNING, deadline, "dispatcher");
-        log.info("[{}] worker group resumed", key);
     }
 
-    // ======================== 热更新 resize ========================
+    /** 调度器当前运行状态：RUNNING / PAUSE_PENDING / PAUSED / RUN_PENDING；组未启动返回 null */
+    Dispatcher.PausePhase getDispatcherPhase() {
+        return dispatcher == null ? null : dispatcher.getPhase();
+    }
+
+    /** 组已启动校验 */
+    private void requireRunning() {
+        if (!running) {
+            throw new IllegalStateException("[" + key + "] group not started");
+        }
+    }
+
+    // ======================== 热更新：分区数 ========================
 
     /**
-     * 运行时调整分区数（先 pauseAll，改 partitions，再 resumeAll）。
-     * 与 {@link #shutdown()} 互斥；newSize 与当前相同则幂等返回。
+     * 改变分区数：阻塞等待全员排空后，以「构建全新分区组 + 单步原子替换」完成拓扑变更。
+     * 前置要求调度器已暂停（未暂停直接拒绝）；排空即所有 Worker 空闲且队列清空，
+     * 调度器已暂停后不再有新投递，轮询必然收敛。
+     * 失败时未动分区、组保持暂停态，可直接重试。
      *
-     * @param newSize    目标分区数，必须 &gt;= 1
-     * @param timeoutMs  整段超时预算（毫秒，含暂停、改拓扑、恢复）
+     * @param newSize   目标分区数，必须 &gt;= 1
+     * @param timeoutMs 排空等待的超时预算（毫秒）
+     * @throws IllegalStateException    组未启动、正在 shutdown，或调度器未暂停
      * @throws IllegalArgumentException newSize &lt; 1
-     * @throws IllegalStateException    组未启动，或正在 shutdown
-     * @throws TimeoutException         预算内未完成（已回滚）
+     * @throws TimeoutException         预算内未排空（未动分区，组保持暂停态）
      */
-    synchronized void resize(int newSize, long timeoutMs) throws TimeoutException {
+    synchronized void resizePartitions(int newSize, long timeoutMs) throws TimeoutException {
         if (shuttingDown) {
             throw new IllegalStateException("[" + key + "] resize rejected, group is shutting down");
         }
-        if (!running) {
-            throw new IllegalStateException("[" + key + "] group not started");
-        }
+        requireRunning();
         if (newSize < 1) {
             throw new IllegalArgumentException("newSize must be >= 1, got " + newSize);
         }
-        int oldSize = partitions.size();
-        if (newSize == oldSize) {
-            return;
+        List<BatchWorker<T>> oldPartitions = this.partitions;
+        if (dispatcher.getPhase() != Dispatcher.PausePhase.PAUSED) {
+            throw new IllegalStateException("[" + key
+                    + "] dispatcher not paused, call pauseGroup before resizePartitions");
         }
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        List<BatchWorker<T>> addedWorkers = new ArrayList<>();
-        // 缩容只摘除不 shutdown（此时整组已暂停，消费线程仍存活）：成功路径最后才关闭，
-        // 失败回滚直接回挂原实例——避免回滚时重启线程造成新旧消费线程并发执行回调
-        List<BatchWorker<T>> removedWorkers = new ArrayList<>();
-        try {
-            pauseAll(Math.max(0, deadline - System.currentTimeMillis()));
-            if (newSize > oldSize) {
-                for (int i = oldSize; i < newSize; i++) {
-                    BatchWorker<T> worker = new BatchWorker<>(type, flushCallback, failureHandler, config);
-                    worker.setName(key + "-" + i);
-                    addedWorkers.add(worker);
-                    partitions.add(worker);
-                }
-            } else {
-                // 头插保持原序号顺序，回滚时按序回挂即可还原拓扑
-                for (int i = oldSize - 1; i >= newSize; i--) {
-                    removedWorkers.add(0, partitions.remove(i));
-                }
-            }
-            for (BatchWorker<T> worker : addedWorkers) {
-                worker.start();
-            }
-            resumeAll(Math.max(0, deadline - System.currentTimeMillis()));
-            // resume 成功 resize 才算成功：此时才真正关闭缩容摘除的 Worker（已无路由可达）
-            for (BatchWorker<T> worker : removedWorkers) {
-                worker.shutdown();
-            }
-            log.info("[{}] resize complete, partitions {} -> {}", key, oldSize, newSize);
-        } catch (TimeoutException | RuntimeException e) {
-            rollbackResize(oldSize, addedWorkers, removedWorkers);
-            throw e;
+        if (newSize == oldPartitions.size()) {
+            return;   // 幂等
         }
+        awaitAllDrained(oldPartitions, System.currentTimeMillis() + timeoutMs);
+
+        // 静止点之后变更不可失败：全新分区组启动后单步替换，旧组关闭不参与失败路径
+        List<BatchWorker<T>> replacement = new ArrayList<>(newSize);
+        for (int i = 0; i < newSize; i++) {
+            BatchWorker<T> worker = new BatchWorker<>(type, flushCallback, failureHandler, config);
+            worker.setName(key + "-" + i);
+            worker.start();
+            replacement.add(worker);
+        }
+        this.partitions = Collections.unmodifiableList(replacement);
+        for (BatchWorker<T> worker : oldPartitions) {
+            worker.requestStop();
+        }
+        for (BatchWorker<T> worker : oldPartitions) {
+            worker.awaitStop();
+        }
+        log.info("[{}] partitions resized {} -> {}", key, oldPartitions.size(), newSize);
     }
 
     /**
-     * resize 失败回滚：扩容移除新增 Worker；缩容把摘除的 Worker 按原序号回挂
-     * （摘除时未 shutdown，消费线程仍存活，回挂后即可恢复消费）。恢复各线程 RUNNING 意图，
-     * 不在此重试 resumeAll。
+     * 阻塞等待所有 Worker 空闲且队列清空：调度器已暂停后不再有新投递，
+     * idle 一旦为 true 即保持，轮询必然收敛；超时抛出且未动任何状态。
      */
-    private void rollbackResize(int oldSize, List<BatchWorker<T>> addedWorkers,
-                                List<BatchWorker<T>> removedWorkers) {
-        for (BatchWorker<T> worker : addedWorkers) {
-            if (partitions.remove(worker)) {
-                worker.shutdown();
+    private void awaitAllDrained(List<BatchWorker<T>> workers, long deadline) throws TimeoutException {
+        while (true) {
+            boolean allIdle = true;
+            for (BatchWorker<T> worker : workers) {
+                if (!worker.isIdle() || worker.getQueueSize() > 0) {
+                    allIdle = false;
+                    break;
+                }
             }
-        }
-        while (partitions.size() > oldSize) {
-            BatchWorker<T> tail = partitions.remove(partitions.size() - 1);
-            tail.shutdown();
-        }
-        for (BatchWorker<T> worker : removedWorkers) {
-            partitions.add(worker);
-        }
-        dispatcher.requestRun();
-        for (BatchWorker<T> worker : partitions) {
-            worker.requestRun();
-        }
-        log.warn("[{}] resize failed, rolled back to running, partitions={}", key, partitions.size());
-    }
-
-    /** 短轮询等待相位翻到期望值，超时抛 {@link TimeoutException} */
-    private static void awaitPhase(Supplier<PausePhase> phase, PausePhase expected,
-                                   long deadline, String target) throws TimeoutException {
-        while (phase.get() != expected) {
+            if (allIdle) {
+                return;
+            }
             if (System.currentTimeMillis() > deadline) {
-                throw new TimeoutException("wait phase " + expected + " timed out, target=" + target);
+                throw new TimeoutException("[" + key + "] drain wait timed out, partitions=" + workers.size());
             }
             try {
                 Thread.sleep(BatchWorkerConstant.PAUSE_POLL_INTERVAL_MS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new TimeoutException("wait phase " + expected + " interrupted, target=" + target);
+                throw new TimeoutException("[" + key + "] drain wait interrupted");
             }
         }
     }

@@ -15,6 +15,9 @@ import java.util.concurrent.TimeoutException;
  * 注册以组为单位，提交带路由 key（组内路由到固定分区，分区内有序），
  * 关闭按组收口。事务与幂等由 flush 回调自行保证；失败交给
  * failureHandler，不做自动重试。
+ *
+ * <p>分区数运行时调整按「暂停调度器 → 改变分区数 → 恢复调度器」三步编排：
+ * 暂停与恢复为异步意图（置相位即返回），改变分区数要求调度器已暂停。
  */
 public class BatchProcessor {
 
@@ -78,23 +81,68 @@ public class BatchProcessor {
     }
 
     /**
-     * 运行时调整指定组的分区数。
+     * 暂停指定组的调度器：置暂停意图后立即返回，分发线程停止从磁盘缓冲取数；
+     * 分区 Worker 自然消化手头批次至队列清空，submit 照常落盘（削峰语义保留），
+     * 恢复后自动消化积压。改变分区数前须确认调度器已暂停。
      *
-     * @param groupKey   组 key，不可为 null
-     * @param newSize    目标分区数，&gt;= 1
-     * @param timeoutMs  整段超时预算（毫秒）
-     * @throws NullPointerException      groupKey 为 null
-     * @throws IllegalArgumentException  组不存在，或 newSize &lt; 1
-     * @throws IllegalStateException     组未启动，或组正在 shutdown
-     * @throws TimeoutException          预算内未完成（组内已回滚）
+     * @param groupKey 组 key，不可为 null
+     * @throws NullPointerException     groupKey 为 null
+     * @throws IllegalArgumentException 组不存在
+     * @throws IllegalStateException    组未启动
      */
-    public void resizeGroup(String groupKey, int newSize, long timeoutMs) throws TimeoutException {
+    public void pauseDispatcher(String groupKey) {
+        requireGroup(groupKey).pauseDispatcher();
+    }
+
+    /**
+     * 改变指定组的分区数：阻塞等待全员排空后以全新分区组原子替换。
+     * 前置要求调度器已暂停（未暂停抛 {@link IllegalStateException}）；
+     * 失败时分区数不变、组保持暂停态，可直接重试。
+     *
+     * @param groupKey  组 key，不可为 null
+     * @param newSize   目标分区数，&gt;= 1
+     * @param timeoutMs 排空等待的超时预算（毫秒）
+     * @throws NullPointerException     groupKey 为 null
+     * @throws IllegalArgumentException 组不存在，或 newSize &lt; 1
+     * @throws IllegalStateException    组未启动、正在 shutdown，或调度器未暂停
+     * @throws TimeoutException         预算内未排空（未动分区，组保持暂停态）
+     */
+    public void resizePartitions(String groupKey, int newSize, long timeoutMs) throws TimeoutException {
+        requireGroup(groupKey).resizePartitions(newSize, timeoutMs);
+    }
+
+    /**
+     * 恢复指定组的调度器：置运行意图后立即返回，分发线程续投，自动消化磁盘积压。
+     *
+     * @param groupKey 组 key，不可为 null
+     * @throws NullPointerException     groupKey 为 null
+     * @throws IllegalArgumentException 组不存在
+     * @throws IllegalStateException    组未启动
+     */
+    public void resumeDispatcher(String groupKey) {
+        requireGroup(groupKey).resumeDispatcher();
+    }
+
+    /**
+     * 查询指定组调度器的运行状态：RUNNING（已运行）/ PAUSE_PENDING（待暂停）/
+     * PAUSED（已暂停）/ RUN_PENDING（待运行）；组未启动返回 null。
+     *
+     * @param groupKey 组 key，不可为 null
+     * @throws NullPointerException     groupKey 为 null
+     * @throws IllegalArgumentException 组不存在
+     */
+    public Dispatcher.PausePhase getDispatcherPhase(String groupKey) {
+        return requireGroup(groupKey).getDispatcherPhase();
+    }
+
+    /** 按组 key 查找已注册组，不存在即抛（运维操作 fail fast） */
+    private BatchWorkerGroup<?> requireGroup(String groupKey) {
         Objects.requireNonNull(groupKey, "groupKey must not be null");
         BatchWorkerGroup<?> group = groupMap.get(groupKey);
         if (group == null) {
             throw new IllegalArgumentException("worker group not found: key=" + groupKey);
         }
-        group.resize(newSize, timeoutMs);
+        return group;
     }
 
     /**

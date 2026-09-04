@@ -1,7 +1,6 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
-import com.dynamicbatch.common.enums.PausePhase;
 import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +29,7 @@ import java.util.function.BiPredicate;
  * warn 含 entry 摘要后丢弃本条并结束线程；空轮 sleep 被 interrupt → 恢复中断标志并结束线程。
  *
  * <p>暂停检查在循环顶部（两条消息之间生效）：PAUSED 时不取数，本条投递成功才确认暂停。
+ * 暂停/恢复为异步意图：置相位后立即返回，终态由线程自行确认，相位状态机是本类私有实现。
  */
 class Dispatcher<T> {
 
@@ -69,6 +69,18 @@ class Dispatcher<T> {
     /** 分发线程运行标志，{@code false} 时外层 {@link #dispatchLoop} 退出 */
     private volatile boolean running;
 
+    /** 调度器暂停状态机相位：两段式——协调方写意图（*_PENDING），线程在循环顶部确认翻终态（PAUSED/RUNNING） */
+    public enum PausePhase {
+        /** 已运行 */
+        RUNNING,
+        /** 待暂停 */
+        PAUSE_PENDING,
+        /** 已暂停 */
+        PAUSED,
+        /** 待运行 */
+        RUN_PENDING
+    }
+
     /** 热更新暂停相位：协调方置 {@code *_PENDING}，分发线程在循环顶部以 CAS 切换到终态 */
     private final AtomicReference<PausePhase> pausePhase = new AtomicReference<>(PausePhase.RUNNING);
 
@@ -95,19 +107,19 @@ class Dispatcher<T> {
         this.name = name;
     }
 
-    // ======================== 暂停相位 ========================
+    // ======================== 暂停/恢复 ========================
 
-    /** 读当前相位，供协调方短轮询等待确认 */
-    PausePhase getPausePhase() {
+    /** 读当前相位（volatile 读，直接反映线程与协调方共同的最新状态） */
+    PausePhase getPhase() {
         return pausePhase.get();
     }
 
-    /** 置「待暂停」意图（幂等） */
+    /** 置「待暂停」意图（幂等）：意图生效后循环顶部即停止取数，终态由线程在两条消息之间确认 */
     void requestPause() {
         pausePhase.set(PausePhase.PAUSE_PENDING);
     }
 
-    /** 置「待运行」意图，恢复与超时回滚共用；已 RUNNING 不写 */
+    /** 置「待运行」意图；已 RUNNING 不写 */
     void requestRun() {
         if (pausePhase.get() != PausePhase.RUNNING) {
             pausePhase.set(PausePhase.RUN_PENDING);

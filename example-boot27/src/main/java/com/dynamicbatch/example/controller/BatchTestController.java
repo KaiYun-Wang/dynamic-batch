@@ -25,8 +25,10 @@ import java.util.concurrent.TimeoutException;
  * # 批量投递：data 为 "1".."count"，routingKey 同 data（哈希散到各分区并行消费）
  * curl "http://localhost:8080/test-batch/batch-submit?count=1000"
  *
- * # 分区数热更新：3 分区扩到 5 或缩到 2
+ * # 分区数运行时调整（三步按序调用，暂停/恢复为异步意图）：3 分区扩到 5 或缩到 2
+ * curl "http://localhost:8080/test-batch/pause"
  * curl "http://localhost:8080/test-batch/resize?newSize=5&timeoutMs=30000"
+ * curl "http://localhost:8080/test-batch/resume"
  * </pre>
  */
 @RestController
@@ -99,7 +101,25 @@ public class BatchTestController {
     }
 
     /**
-     * 分区数热更新演示。
+     * 暂停调度器：置暂停意图后立即返回，分发线程停止取数；
+     * 分区 Worker 自然消化手头队列，submit 照常落盘。
+     */
+    @GetMapping("/pause")
+    public Map<String, Object> pause() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("groupKey", GROUP_KEY);
+        try {
+            batchProcessor.pauseDispatcher(GROUP_KEY);
+            result.put("ok", true);
+        } catch (RuntimeException e) {
+            result.put("ok", false);
+            result.put("error", e.getMessage());
+        }
+        return result;
+    }
+
+    /**
+     * 改变分区数：阻塞等待全员排空后原子替换。前置要求调度器已暂停（先调 /pause）。
      */
     @GetMapping("/resize")
     public Map<String, Object> resize(@RequestParam int newSize,
@@ -108,11 +128,28 @@ public class BatchTestController {
         result.put("groupKey", GROUP_KEY);
         result.put("newSize", newSize);
         try {
-            batchProcessor.resizeGroup(GROUP_KEY, newSize, timeoutMs);
+            batchProcessor.resizePartitions(GROUP_KEY, newSize, timeoutMs);
             result.put("ok", true);
         } catch (TimeoutException e) {
             result.put("ok", false);
             result.put("error", "timeout: " + e.getMessage());
+        } catch (RuntimeException e) {
+            result.put("ok", false);
+            result.put("error", e.getMessage());
+        }
+        return result;
+    }
+
+    /**
+     * 恢复调度器：置运行意图后立即返回，自动消化暂停期间的磁盘积压。
+     */
+    @GetMapping("/resume")
+    public Map<String, Object> resume() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("groupKey", GROUP_KEY);
+        try {
+            batchProcessor.resumeDispatcher(GROUP_KEY);
+            result.put("ok", true);
         } catch (RuntimeException e) {
             result.put("ok", false);
             result.put("error", e.getMessage());

@@ -1,7 +1,6 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
-import com.dynamicbatch.common.enums.PausePhase;
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.queue.VariableLinkedBlockingQueue;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
@@ -12,8 +11,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 
@@ -27,7 +24,7 @@ import java.util.function.Consumer;
  * <p>配置不落在本类：全部读取组共享的 {@link BatchWorkerGroupConfigPOJO}（同一实例），
  * 本类只保留 name 与 queue 两个自身状态。
  *
- * <p>支持运行中暂停/恢复：暂停在批次边界生效，不打断在途批次。
+ * <p>空闲标志：队列无数据且无在途批次时为 true（批次边界置位），分区组替换据此判定静止点。
  */
 public class BatchWorker<T> {
     private static final Logger log = LoggerFactory.getLogger(BatchWorker.class);
@@ -44,8 +41,8 @@ public class BatchWorker<T> {
     private volatile boolean running;
     private Thread consumerThread;
 
-    /** 热更新暂停相位：协调方置 {@code *_PENDING}，消费线程在批次边界以 CAS 切换到终态 */
-    private final AtomicReference<PausePhase> pausePhase = new AtomicReference<>(PausePhase.RUNNING);
+    /** 空闲标志：队列无数据且无在途批次时为 true（批次边界置位），分区组替换据此判定静止点 */
+    private volatile boolean idle;
 
     /**
      * 由 {@link BatchWorkerGroup} 构造分区时直接调用，共享同一 config 实例；
@@ -65,23 +62,11 @@ public class BatchWorker<T> {
         this.name = name;
     }
 
-    // ======================== 暂停相位 ========================
+    // ======================== 停止与空闲 ========================
 
-    /** 读当前相位，供协调方短轮询等待确认 */
-    PausePhase getPausePhase() {
-        return pausePhase.get();
-    }
-
-    /** 置「待暂停」意图（幂等） */
-    void requestPause() {
-        pausePhase.set(PausePhase.PAUSE_PENDING);
-    }
-
-    /** 置「待运行」意图，恢复与超时回滚共用；已 RUNNING 不写 */
-    void requestRun() {
-        if (pausePhase.get() != PausePhase.RUNNING) {
-            pausePhase.set(PausePhase.RUN_PENDING);
-        }
+    /** 空闲标志：队列无数据且无在途批次时为 true，协调方据此判定分区组已到静止点 */
+    boolean isIdle() {
+        return idle;
     }
 
     public synchronized void start() {
@@ -137,30 +122,14 @@ public class BatchWorker<T> {
         List<T> batch = new ArrayList<>(config.getBatchSize());
         while (running) {
             try {
-                // 暂停检查：批次边界生效，本批 flush 完回到此处才确认
-                PausePhase phase = pausePhase.get();
-                if (phase == PausePhase.PAUSE_PENDING || phase == PausePhase.PAUSED) {
-                    // 确认前排空篮子，保证已暂停时篮子必空
-                    if (!batch.isEmpty()) {
-                        flushBatch(batch);
-                        batch.clear();
-                    }
-                    // CAS 切换：期望不符说明相位已变（如协调方超时回滚），下轮重读重判
-                    pausePhase.compareAndSet(PausePhase.PAUSE_PENDING, PausePhase.PAUSED);
-                    Thread.sleep(BatchWorkerConstant.WAKEUP_INTERVAL_MS);
-                    continue;
-                }
-                if (phase == PausePhase.RUN_PENDING
-                        && !pausePhase.compareAndSet(PausePhase.RUN_PENDING, PausePhase.RUNNING)) {
-                    continue;   // 切换失败（相位已变）：重读，勿直接消费
-                }
-
                 // 用限时 poll 代替阻塞 take：running=false 后最迟 WAKEUP_INTERVAL_MS 感知到停止信号，
                 // 不会被攒批窗口（maxWaitMs 可能很大）卡住，关闭响应与攒批时长彻底解耦
                 T first = queue.poll(BatchWorkerConstant.WAKEUP_INTERVAL_MS, TimeUnit.MILLISECONDS);
                 if (first == null) {
+                    idle = true;   // poll 超时 = 无数据且无在途批次：批次边界上的静止点
                     continue;
                 }
+                idle = false;      // 手里已有数据，攒批/flush 完成前非空闲
                 batch.add(first);
 
                 long startTime = System.nanoTime();
@@ -227,26 +196,35 @@ public class BatchWorker<T> {
     }
 
     /**
-     * 优雅关闭
-     * <p>先等消费线程自然退出，超时则强制中断，最后分批刷盘队列中剩余数据</p>
+     * 优雅关闭（生命周期关闭）：置停止信号 → 等消费线程退出 → 排空队列剩余数据分批刷盘
      */
     public synchronized void shutdown() {
-        running = false;
+        requestStop();
+        awaitStop();
+        flushRemaining();
+        log.info("[{}] worker stopped", name);
+    }
 
+    /** 置停止信号，不等消费线程退出（与 {@link #awaitStop()} 配对） */
+    void requestStop() {
+        running = false;
+    }
+
+    /**
+     * 等消费线程退出：自然退出超时则强制中断再短等。
+     * 不刷盘队列——刷盘是 {@link #shutdown()} 的收尾，分区组替换场景队列必空、无刷盘需求。
+     */
+    void awaitStop() {
         if (consumerThread == null) {
-            // 从未启动过，直接刷盘队列中剩余数据
-            flushRemaining();
-            log.info("[{}] worker stopped", name);
             return;
         }
-
         // 消费线程最迟 WAKEUP_INTERVAL_MS 内感知停止信号并自然退出，
         // 这里只需等它把手头批次处理完（含 flushCallback 耗时），与攒批窗口 maxWaitMs 无关
         try {
             consumerThread.join(BatchWorkerConstant.SHUTDOWN_WAIT_MS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.warn("[{}] shutdown interrupted while waiting for consumer", name);
+            log.warn("[{}] await stop interrupted while waiting for consumer", name);
         }
 
         // 超时仍存活：说明卡在慢回调/异常中，强制中断兜底
@@ -254,17 +232,13 @@ public class BatchWorker<T> {
             log.warn("[{}] consumer still alive after {}ms, forcing interrupt; " +
                     "flushCallback may still be running, ensure it is thread-safe", name, BatchWorkerConstant.SHUTDOWN_WAIT_MS);
             consumerThread.interrupt();
-            // 中断后再短暂等待，确保消费线程真正退出，避免与下方刷盘并发执行回调
+            // 中断后再短暂等待，确保消费线程真正退出，避免与调用方后续动作并发执行回调
             try {
                 consumerThread.join(1000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
-
-        // 排空队列中剩余数据并分批刷盘
-        flushRemaining();
-        log.info("[{}] worker stopped", name);
     }
 
     /**
@@ -278,30 +252,6 @@ public class BatchWorker<T> {
             for (int i = 0; i < remaining.size(); i += config.getBatchSize()) {
                 int end = Math.min(i + config.getBatchSize(), remaining.size());
                 flushBatch(remaining.subList(i, end));
-            }
-        }
-    }
-
-    /**
-     * 排空队列残留并分批刷盘，带超时（暂停期间由协调方调用，要求本 Worker 已暂停）。
-     * 逐批捞取：超时中断时未捞数据留在队列，恢复后继续消费，顺序不乱。
-     *
-     * @param timeoutMs 排空超时预算（毫秒）
-     * @throws TimeoutException 预算内未排空，剩余数据留在队列
-     */
-    void flushRemainingWithTimeout(long timeoutMs) throws TimeoutException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        List<T> batch = new ArrayList<>(config.getBatchSize());
-        while (true) {
-            batch.clear();
-            queue.drainTo(batch, config.getBatchSize());
-            if (batch.isEmpty()) {
-                return;   // 已排空（即使超时，排空即成功）
-            }
-            flushBatch(batch);
-            if (System.currentTimeMillis() > deadline && !queue.isEmpty()) {
-                throw new TimeoutException("flush remaining timed out after " + timeoutMs
-                        + "ms, worker=" + name + ", queueSize=" + queue.size());
             }
         }
     }
