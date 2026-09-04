@@ -124,6 +124,21 @@ public class BatchProcessor {
     }
 
     /**
+     * 运行时调整指定组的攒批参数：batchSize / maxWaitMs，null = 不改。
+     * 合并后整体校验，任一非法则组配置不变；下一批自动生效。
+     *
+     * @param groupKey  组 key，不可为 null
+     * @param batchSize 攒批条数，null = 不改
+     * @param maxWaitMs 最大等待毫秒，null = 不改
+     * @throws NullPointerException     groupKey 为 null
+     * @throws IllegalArgumentException 组不存在，或参数非法
+     * @throws IllegalStateException    组未启动
+     */
+    public void resizeGroupConfig(String groupKey, Integer batchSize, Long maxWaitMs) {
+        requireGroup(groupKey).resizeGroupConfig(batchSize, maxWaitMs);
+    }
+
+    /**
      * 查询指定组调度器的运行状态：RUNNING（已运行）/ PAUSE_PENDING（待暂停）/
      * PAUSED（已暂停）/ RUN_PENDING（待运行）；组未启动返回 null。
      *

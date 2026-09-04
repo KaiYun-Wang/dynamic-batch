@@ -353,6 +353,49 @@ public class BatchWorkerGroup<T> {
         }
     }
 
+    // ======================== 热更新：配置参数 ========================
+
+    /** 当前攒批条数（组共享配置） */
+    int getBatchSize() {
+        return config.getBatchSize();
+    }
+
+    /** 当前最大等待毫秒（组共享配置） */
+    long getMaxWaitMs() {
+        return config.getMaxWaitMs();
+    }
+
+    /** 当前内存队列容量（组共享配置） */
+    int getQueueCapacity() {
+        return config.getQueueCapacity();
+    }
+
+    /**
+     * 运行时调整攒批参数：batchSize / maxWaitMs，null = 不改。合并后整体校验，
+     * 任一非法则配置不变；消费线程每轮读共享配置，下一批自动生效。
+     *
+     * @throws IllegalStateException    组未启动
+     * @throws IllegalArgumentException batchSize &lt;= 0、&gt; queueCapacity，或 maxWaitMs &lt; 0
+     */
+    synchronized void resizeGroupConfig(Integer batchSize, Long maxWaitMs) {
+        requireRunning();
+        int newBatchSize = batchSize != null ? batchSize : config.getBatchSize();
+        long newMaxWaitMs = maxWaitMs != null ? maxWaitMs : config.getMaxWaitMs();
+        if (newBatchSize <= 0) {
+            throw new IllegalArgumentException("batchSize must be > 0, got " + newBatchSize);
+        }
+        if (newBatchSize > config.getQueueCapacity()) {
+            throw new IllegalArgumentException("batchSize must be <= queueCapacity, got batchSize:"
+                    + newBatchSize + " > queueCapacity:" + config.getQueueCapacity());
+        }
+        if (newMaxWaitMs < 0) {
+            throw new IllegalArgumentException("maxWaitMs must be >= 0, got " + newMaxWaitMs);
+        }
+        config.setBatchSize(newBatchSize);
+        config.setMaxWaitMs(newMaxWaitMs);
+        log.info("[{}] batch config updated, batchSize={}, maxWaitMs={}", key, newBatchSize, newMaxWaitMs);
+    }
+
     // ======================== Builder ========================
 
     /**

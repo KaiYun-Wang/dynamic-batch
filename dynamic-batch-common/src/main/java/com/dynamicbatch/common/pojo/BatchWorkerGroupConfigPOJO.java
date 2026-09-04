@@ -14,10 +14,10 @@ public class BatchWorkerGroupConfigPOJO {
 
     /** 内存队列容量上限（队列满时由投递方背压处理，见 {@code BatchWorker#submit}） */
     private Integer queueCapacity;
-    /** 攒批条数，达到此数量立即触发 flush */
-    private Integer batchSize;
-    /** 最大等待毫秒，未攒满时最多等这么久再 flush（从收到第一条数据开始计时） */
-    private Long maxWaitMs;
+    /** 攒批条数，达到此数量立即触发 flush；volatile：消费线程每轮读，调参线程写 */
+    private volatile Integer batchSize;
+    /** 最大等待毫秒，未攒满时最多等这么久再 flush（从收到第一条数据开始计时）；volatile 同 batchSize */
+    private volatile Long maxWaitMs;
 
     public Integer getQueueCapacity() {
         return queueCapacity;
