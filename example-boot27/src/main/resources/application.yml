@@ -34,9 +34,9 @@ dynamic-batch:
       - platform: ding
         # TODO 钉钉机器人 webhook，形如：
         # https://oapi.dingtalk.com/robot/send?access_token=你的token
-        webhook: ""
+        webhook: "https://oapi.dingtalk.com/robot/send?access_token=REDACTED"
         # TODO 机器人安全设置选“加签”时的密钥；非加签模式留空
-        secret: ""
+        secret: "REDACTED"
         # webhook 未携带 access_token 时，也可在此填 token（与 webhook 二选一）
         # urlKey: ""
         # @ 的手机号，逗号分隔；"all" 或留空 = @所有人

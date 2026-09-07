@@ -33,9 +33,9 @@ public class SpoolCapacityNoticeTemplate implements NoticeTemplate<SpoolCapacity
                 .append(" / ").append(formatBytes(context.getMaxBytes()))
                 .append("（").append(context.getPercent()).append("%）\n");
         content.append("- 还未读: ").append(formatBytes(context.getPendingBytes()))
-                .append("（偏大 = 消费跟不上）\n");
+                .append("\n");
         content.append("- 已读完未删除: ").append(formatBytes(context.getConsumedBytes()))
-                .append("（偏大 = 清理滞后）\n");
+                .append("\n");
         content.append("- 时间: ").append(LocalDateTime.now().format(TIME_FORMAT)).append("\n");
         return content.toString();
     }

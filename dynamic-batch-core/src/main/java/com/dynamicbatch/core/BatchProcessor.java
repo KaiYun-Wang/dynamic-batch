@@ -1,10 +1,14 @@
 package com.dynamicbatch.core;
 
+import com.dynamicbatch.core.vo.GroupSnapshotVO;
 import com.dynamicbatch.spool.DiskUsage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -180,6 +184,33 @@ public class BatchProcessor {
             }
         }
         return result;
+    }
+
+    // ======================== 运行快照查询 ========================
+
+    /**
+     * 查询指定组运行快照（字段语义见 {@link GroupSnapshotVO}）。
+     *
+     * @param groupKey 组 key，不可为 null
+     * @return 组不存在返回 null
+     */
+    public GroupSnapshotVO getGroupSnapshot(String groupKey) {
+        Objects.requireNonNull(groupKey, "groupKey must not be null");
+        BatchWorkerGroup<?> group = groupMap.get(groupKey);
+        return group == null ? null : group.snapshot();
+    }
+
+    /**
+     * 查询全部已注册组的运行快照（字段语义见 {@link GroupSnapshotVO}）。
+     *
+     * @return 不可变列表；无注册组时为空列表
+     */
+    public List<GroupSnapshotVO> listGroupSnapshots() {
+        List<GroupSnapshotVO> result = new ArrayList<>(groupMap.size());
+        for (BatchWorkerGroup<?> group : groupMap.values()) {
+            result.add(group.snapshot());
+        }
+        return Collections.unmodifiableList(result);
     }
 
     /** 按组 key 查找已注册组，不存在即抛（运维操作 fail fast） */
