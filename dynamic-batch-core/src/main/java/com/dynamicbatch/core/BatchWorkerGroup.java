@@ -6,6 +6,7 @@ import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import com.dynamicbatch.core.serializer.SpoolEntrySerializer;
+import com.dynamicbatch.core.vo.GroupSnapshotVO;
 import com.dynamicbatch.spool.DiskUsage;
 import com.dynamicbatch.spool.JdkSerializer;
 import com.dynamicbatch.spool.Serializer;
@@ -292,6 +293,42 @@ public class BatchWorkerGroup<T> {
             return spool.diskUsage();
         } catch (Exception e) {
             log.warn("[{}] spool usage query failed", key, e);
+            return null;
+        }
+    }
+
+    // ======================== 运行快照 ========================
+
+    /**
+     * 组运行快照：配置、分区、相位、队列水位与磁盘占用（字段语义见 {@link GroupSnapshotVO}）。
+     * 各字段独立读取，未启动组相位与磁盘字段为 null。
+     */
+    GroupSnapshotVO snapshot() {
+        Dispatcher.PausePhase phase = getDispatcherPhase();
+        return new GroupSnapshotVO(key, running, config.getQueueCapacity(), config.getBatchSize(),
+                config.getMaxWaitMs(), partitions.size(), phase == null ? null : phase.name(),
+                getPartitionQueueSizes(), getStagingSize(), getSpoolUsage());
+    }
+
+    /** 各分区内存队列当前水位，下标即分区号 */
+    private List<Integer> getPartitionQueueSizes() {
+        List<BatchWorker<T>> snapshot = partitions;
+        List<Integer> sizes = new ArrayList<>(snapshot.size());
+        for (BatchWorker<T> worker : snapshot) {
+            sizes.add(worker.getQueueSize());
+        }
+        return sizes;
+    }
+
+    /** Spool 暂存积压条数；未启动或统计失败返回 null */
+    private Integer getStagingSize() {
+        if (!running || spool == null) {
+            return null;
+        }
+        try {
+            return spool.stagingSize();
+        } catch (Exception e) {
+            log.warn("[{}] spool staging size query failed", key, e);
             return null;
         }
     }
