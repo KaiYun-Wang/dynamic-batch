@@ -55,21 +55,38 @@ public class DispatcherTest {
 
     /**
      * deliver 返回 false（投递被放弃：worker 已关闭 / 阻塞投递被中断）时，线程应随即退出。
+     * 门闩保证断言时线程已到达 poll 点：start 与查找间无同步，线程本就验完即退。
      */
     @Test
     public void deliverAbandonedExitsThread() throws Exception {
         SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("stuck-key", "stuck-value");
-        AtomicBoolean polled = new AtomicBoolean();
+        CountDownLatch pollStarted = new CountDownLatch(1);
+        AtomicBoolean release = new AtomicBoolean();
 
         Dispatcher<String> dispatcher = new Dispatcher<>(
-                lockTimeoutMs -> polled.compareAndSet(false, true) ? entry : null,
+                lockTimeoutMs -> {
+                    pollStarted.countDown();
+                    // 等主线程完成“线程活着”断言后再返回条目，避免线程提前跑完消失
+                    while (!release.get()) {
+                        try {
+                            Thread.sleep(10);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;   // 强制关闭中断：返回后 deliver false 退出，语义不变
+                        }
+                    }
+                    return entry;
+                },
                 (routingKey, payload) -> false);
 
         dispatcher.setName("test-abandon");
         dispatcher.start();
+        assertTrue("线程应到达 poll 点（此时必然活着）", pollStarted.await(2, TimeUnit.SECONDS));
 
         Thread dispatcherThread = findDispatcherThread("test-abandon");
         assertTrue(dispatcherThread != null && dispatcherThread.isAlive());
+        release.set(true);
+
         dispatcherThread.join(2000);
         assertFalse("投递被放弃后线程应结束", dispatcherThread.isAlive());
         dispatcher.stop();

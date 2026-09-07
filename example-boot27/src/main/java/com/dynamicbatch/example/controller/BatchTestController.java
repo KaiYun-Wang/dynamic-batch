@@ -3,6 +3,7 @@ package com.dynamicbatch.example.controller;
 import com.dynamicbatch.core.BatchProcessor;
 import com.dynamicbatch.core.BatchWorkerGroup;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
+import com.dynamicbatch.spool.DiskUsage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -29,6 +30,11 @@ import java.util.concurrent.TimeoutException;
  * curl "http://localhost:8080/test-batch/pause"
  * curl "http://localhost:8080/test-batch/resize?newSize=5&timeoutMs=30000"
  * curl "http://localhost:8080/test-batch/resume"
+ *
+ * # 容量告警演示：backlog_demo 组预算 400MB（一个预扩容文件 ~80MB），
+ * # flush 回调 sleep 5s 拖慢消费使积压保持；灌一次后每次巡检（5s）都会告警
+ * curl "http://localhost:8080/test-batch/backlog/submit"
+ * curl "http://localhost:8080/test-batch/backlog/usage"
  * </pre>
  */
 @RestController
@@ -38,6 +44,10 @@ public class BatchTestController {
     private static final Logger log = LoggerFactory.getLogger(BatchTestController.class);
 
     private static final String GROUP_KEY = "partition_demo";
+
+    /** 容量告警演示组：预算 40MB（小于一个预扩容文件 ~80MB，落盘即超阈值），1 秒滚动 */
+    private static final String BACKLOG_GROUP_KEY = "backlog_demo";
+    private static final long BACKLOG_MAX_SIZE_BYTES = 400L * 1024 * 1024;
 
     private final BatchProcessor batchProcessor;
 
@@ -60,6 +70,28 @@ public class BatchTestController {
             log.info("test-batch 组已注册, group={}, partitions=3", GROUP_KEY);
         } catch (IllegalStateException e) {
             log.warn("test-batch 组已存在, 跳过注册: {}", e.getMessage());
+        }
+        try {
+            batchProcessor.registerGroup(BACKLOG_GROUP_KEY,
+                    BatchWorkerGroup.builder(String.class,
+                            SpoolConfigPOJO.builder("spool-demo-backlog")
+                                    .maxSizeBytes(BACKLOG_MAX_SIZE_BYTES)
+                                    .rollCycleMillis(1000)
+                                    .cleanupIntervalMs(10000)
+                                    .build(),
+                            batch -> {
+                                // 拖慢消费：worker 队列堆满后调度器阻塞投递、停止从 Spool 取数，磁盘积压得以保持
+                                try {
+                                    Thread.sleep(5000);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                log.info("backlog flushed {} items", batch.size());
+                            })
+                            .build());
+            log.info("容量告警演示组已注册, group={}, maxSizeBytes=40MB", BACKLOG_GROUP_KEY);
+        } catch (IllegalStateException e) {
+            log.warn("容量告警演示组已存在, 跳过注册: {}", e.getMessage());
         }
     }
 
@@ -153,6 +185,46 @@ public class BatchTestController {
             result.put("ok", false);
             result.put("error", e.getMessage());
         }
+        return result;
+    }
+
+    /**
+     * 灌积压数据（容量告警演示）：往 backlog_demo 组投递 1 条。预算 40MB，一个预扩容
+     * 文件 ~80MB 即超阈值，灌一次后每次巡检（5s）都会触发 SPOOL_CAPACITY 告警；
+     * flush 回调 sleep 5s 拖慢消费使积压保持。预算满后后续 submit 被拒并触发 OFFER_FAILED 告警，
+     * 测试完删除 spool-demo-backlog 目录。
+     */
+    @GetMapping("/backlog/submit")
+    public Map<String, Object> backlogSubmit() {
+        String data = "backlog-" + System.nanoTime();
+        boolean ok = batchProcessor.submit(BACKLOG_GROUP_KEY, data, data);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("groupKey", BACKLOG_GROUP_KEY);
+        result.put("data", data);
+        result.put("accepted", ok);
+        return result;
+    }
+
+    /**
+     * 查看积压测试组当前磁盘占用（即时分桶统计，与容量告警同口径）。
+     */
+    @GetMapping("/backlog/usage")
+    public Map<String, Object> backlogUsage() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("groupKey", BACKLOG_GROUP_KEY);
+        DiskUsage usage = batchProcessor.getSpoolUsage(BACKLOG_GROUP_KEY);
+        if (usage == null) {
+            result.put("ok", false);
+            result.put("error", "组不存在或未启动");
+            return result;
+        }
+        result.put("totalBytes", usage.getTotalBytes());
+        result.put("maxSizeBytes", usage.getMaxSizeBytes());
+        result.put("percent", usage.getMaxSizeBytes() == Long.MAX_VALUE ? 0
+                : (int) Math.min(100, usage.getTotalBytes() * 100 / usage.getMaxSizeBytes()));
+        result.put("consumedBytes", usage.getConsumedBytes());
+        result.put("pendingBytes", usage.getPendingBytes());
         return result;
     }
 }

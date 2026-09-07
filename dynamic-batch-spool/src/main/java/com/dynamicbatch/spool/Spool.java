@@ -3,6 +3,7 @@ package com.dynamicbatch.spool;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.RollCycle;
 import net.openhft.chronicle.queue.RollCycles;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
 import net.openhft.chronicle.queue.rollcycles.TestRollCycles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +38,9 @@ public class Spool<T> implements Closeable {
 
     /** 目录独占锁文件名 */
     private static final String LOCK_FILE = ".spool.lock";
+
+    /** 数据滚动文件后缀 */
+    static final String DATA_FILE_SUFFIX = SingleChronicleQueue.SUFFIX;
 
     // Chronicle 全局开关：关启动公告；允许多线程通过同一 queue 创建 appender/tailer（本模块自行串行化写/读）
     static {
@@ -147,17 +151,13 @@ public class Spool<T> implements Closeable {
 
     /**
      * 扫描队列目录，更新 {@link #currentSizeBytes}。
-     * <p>由定时任务与清理旧文件后调用；统计目录内数据文件总长度（忽略 {@code .spool.lock}）。</p>
+     * <p>由定时任务与清理旧文件后调用；只统计数据滚动文件（.cq4）。</p>
      */
     public void refreshDiskUsage() {
         long total = 0L;
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
             for (Path p : stream) {
-                String name = p.getFileName().toString();
-                if (LOCK_FILE.equals(name)) {
-                    continue;
-                }
-                if (!Files.isRegularFile(p)) {
+                if (!p.getFileName().toString().endsWith(DATA_FILE_SUFFIX) || !Files.isRegularFile(p)) {
                     continue;
                 }
                 total += Files.size(p);
@@ -171,9 +171,27 @@ public class Spool<T> implements Closeable {
                 currentSizeBytes, config.maxSizeBytes, dir);
     }
 
-    /** 目录当前占用字节数（最近一次 {@link #refreshDiskUsage()} 的结果） */
+    /** 目录当前占用字节数（定时刷新的缓存值）；实时口径见 {@link #diskUsage()} */
     public long getCurrentSizeBytes() {
         return currentSizeBytes;
+    }
+
+    /**
+     * 磁盘占用即时拆分（实时列目录求和），拆分语义见 {@link DiskUsage}。
+     * 拿读锁执行，与 poll / 清理互斥。
+     *
+     * @return 占用拆分；已关闭或统计失败返回 null
+     */
+    public DiskUsage diskUsage() {
+        if (closed) {
+            return null;
+        }
+        try {
+            return reader.breakdownDiskUsage();
+        } catch (Exception e) {
+            log.warn("failed to breakdown disk usage, dir={}", dir, e);
+            return null;
+        }
     }
 
     /**

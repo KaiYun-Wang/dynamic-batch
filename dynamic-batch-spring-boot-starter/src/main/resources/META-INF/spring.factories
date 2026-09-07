@@ -1,3 +1,4 @@
 org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
 com.dynamicbatch.spring.autoconfigure.BatchProcessorAutoConfiguration,\
-com.dynamicbatch.spring.autoconfigure.NotifyAutoConfiguration
+com.dynamicbatch.spring.autoconfigure.NotifyAutoConfiguration,\
+com.dynamicbatch.spring.autoconfigure.MonitorAutoConfiguration

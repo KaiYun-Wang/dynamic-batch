@@ -8,15 +8,19 @@ import com.dynamicbatch.core.notifier.channel.NotifierRegistry;
 import com.dynamicbatch.core.notifier.context.FlushFailedContext;
 import com.dynamicbatch.core.notifier.context.NotifyContext;
 import com.dynamicbatch.core.notifier.context.OfferFailedContext;
+import com.dynamicbatch.core.notifier.context.SpoolCapacityContext;
 import com.dynamicbatch.core.notifier.template.FlushFailedNoticeTemplate;
 import com.dynamicbatch.core.notifier.template.NoticeTemplate;
 import com.dynamicbatch.core.notifier.template.OfferFailedNoticeTemplate;
+import com.dynamicbatch.core.notifier.template.SpoolCapacityNoticeTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -55,9 +59,13 @@ public class NotifyManager {
     /** 平台配置（yml 绑定），init 时注入；空列表 = 通知功能关闭 */
     private volatile List<NotifyPlatformPOJO> platforms = Collections.emptyList();
 
+    /** 登记且 enabled=true 的通知类型名（大写），initItems 时全量刷新；空集 = 全部告警关闭 */
+    private volatile Set<String> enabledTypes = Collections.emptySet();
+
     private NotifyManager() {
         registerTemplate(new OfferFailedNoticeTemplate());
         registerTemplate(new FlushFailedNoticeTemplate());
+        registerTemplate(new SpoolCapacityNoticeTemplate());
     }
 
     public static NotifyManager getInstance() {
@@ -78,14 +86,32 @@ public class NotifyManager {
     /**
      * 注入通知项配置（spring 层启动时调用，绑定 yml 的 dynamic-batch.notify.notify-items）。
      *
-     * <p>每个通知项配置了静默期等告警行为参数，初始化后传给 {@link NotifyLimiter}。
-     * 不调此方法或传空列表时全部不限流（向后兼容）。
+     * <p>登记且 {@code enabled=true} 的类型才启用告警，静默期传给 {@link NotifyLimiter}。
      *
-     * @param items 通知项配置列表，可为空
+     * @param items 通知项配置列表，可为空（全部告警关闭且不限流）
      */
     public void initItems(List<NotifyItemPOJO> items) {
         NotifyLimiter.init(items);
+        Set<String> enabled = new HashSet<>();
+        if (items != null) {
+            for (NotifyItemPOJO item : items) {
+                if (item.getType() != null && !item.getType().isEmpty() && item.isEnabled()) {
+                    enabled.add(item.getType().toUpperCase());
+                }
+            }
+        }
+        this.enabledTypes = enabled;
         log.info("notify items initialized, items={}", items);
+    }
+
+    /**
+     * 指定类型告警是否启用：notify-items 登记且 enabled=true。
+     *
+     * @param type 通知类型
+     * @return true 启用
+     */
+    public boolean isEnabled(NotifyTypeEnum type) {
+        return enabledTypes.contains(type.name());
     }
 
     /**
@@ -109,6 +135,10 @@ public class NotifyManager {
      * @param queueSize 失败时刻队列中的元素数量
      */
     public void tryNoticeOfferFailedAsync(String key, String reason, int queueSize) {
+        if (isDisabled(NotifyTypeEnum.OFFER_FAILED)) {
+            log.debug("notify skipped, type disabled, type={}", NotifyTypeEnum.OFFER_FAILED);
+            return;
+        }
         NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.OFFER_FAILED,
                 new OfferFailedContext(key, reason, queueSize)));
     }
@@ -122,8 +152,38 @@ public class NotifyManager {
      * @param dataLossRisk failureHandler 未配置或也未兜住时为 true
      */
     public void tryNoticeFlushFailedAsync(String key, int failedSize, String errorMsg, boolean dataLossRisk) {
+        if (isDisabled(NotifyTypeEnum.FLUSH_FAILED)) {
+            log.debug("notify skipped, type disabled, type={}", NotifyTypeEnum.FLUSH_FAILED);
+            return;
+        }
         NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.FLUSH_FAILED,
                 new FlushFailedContext(key, failedSize, errorMsg, dataLossRisk)));
+    }
+
+    /**
+     * Spool 容量告警（检测型）：spring 层定时巡检发现磁盘占用达到预算阈值时投递，
+     * 异步执行立即返回；持续超限由静默期（notify-items 的 silencePeriod）冷却。
+     *
+     * @param key           组唯一标识
+     * @param currentBytes  巡检时刻目录总占用（字节）
+     * @param maxBytes      磁盘预算（字节），Long.MAX_VALUE = 未配置
+     * @param percent       当前占用占预算的百分比
+     * @param consumedBytes 已读完未删除（字节）
+     * @param pendingBytes  还未读（字节）
+     */
+    public void tryNoticeSpoolCapacityAsync(String key, long currentBytes, long maxBytes, int percent,
+                                            long consumedBytes, long pendingBytes) {
+        if (isDisabled(NotifyTypeEnum.SPOOL_CAPACITY)) {
+            log.debug("notify skipped, type disabled, type={}", NotifyTypeEnum.SPOOL_CAPACITY);
+            return;
+        }
+        NOTIFY_EXECUTOR.execute(() -> doTryNotice(NotifyTypeEnum.SPOOL_CAPACITY,
+                new SpoolCapacityContext(key, currentBytes, maxBytes, percent, consumedBytes, pendingBytes)));
+    }
+
+    /** 未登记或 enabled=false 即关闭 */
+    private boolean isDisabled(NotifyTypeEnum type) {
+        return !enabledTypes.contains(type.name());
     }
 
     @SuppressWarnings("unchecked")

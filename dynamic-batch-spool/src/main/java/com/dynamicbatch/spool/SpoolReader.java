@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
@@ -131,7 +132,7 @@ class SpoolReader implements Closeable {
         try (Stream<Path> stream = Files.list(dir)) {
             // ponytail: JDK8 无 takeWhile，用循环
             java.util.List<Path> sorted = new java.util.ArrayList<>();
-            stream.filter(p -> p.toString().endsWith(".cq4"))
+            stream.filter(p -> p.toString().endsWith(Spool.DATA_FILE_SUFFIX))
                     .sorted()
                     .forEach(sorted::add);
             for (Path p : sorted) {
@@ -154,5 +155,54 @@ class SpoolReader implements Closeable {
         }
     }
 
-     // ======================== 文件清理 ========================
+    // ======================== 文件清理 ========================
+
+    /**
+     * 即时统计目录占用拆分，拿读锁（与 poll / 清理互斥），拆分语义见 {@link DiskUsage}。
+     * tailer 从未 poll 过时 currentFile() 为 null，全部数据文件计入未读侧。
+     *
+     * @return 占用拆分；目录不可读或列目录失败返回 null
+     */
+    DiskUsage breakdownDiskUsage() {
+        lock.lock();
+        try {
+            return doBreakdownDiskUsage();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private DiskUsage doBreakdownDiskUsage() {
+        File current = tailer.currentFile();
+        String currentName = current == null ? null : current.getName();
+
+        Path dir = config.dir;
+        if (!Files.isDirectory(dir)) return null;
+
+        long total = 0L, consumed = 0L, pending = 0L;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
+            for (Path p : stream) {
+                String name = p.getFileName().toString();
+                if (!name.endsWith(Spool.DATA_FILE_SUFFIX) || !Files.isRegularFile(p)) {
+                    continue;
+                }
+                long size;
+                try {
+                    size = Files.size(p);
+                } catch (IOException e) {
+                    continue; // 文件恰好被清理线程删除等竞态，按 0 计
+                }
+                total += size;
+                if (currentName != null && name.compareTo(currentName) < 0) {
+                    consumed += size;
+                } else {
+                    pending += size;
+                }
+            }
+        } catch (IOException e) {
+            log.warn("breakdown disk usage list failed, dir={}", dir, e);
+            return null;
+        }
+        return new DiskUsage(total, consumed, pending, config.maxSizeBytes);
+    }
 }

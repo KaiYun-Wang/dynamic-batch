@@ -1,8 +1,10 @@
 package com.dynamicbatch.core;
 
+import com.dynamicbatch.spool.DiskUsage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -148,6 +150,36 @@ public class BatchProcessor {
      */
     public Dispatcher.PausePhase getDispatcherPhase(String groupKey) {
         return requireGroup(groupKey).getDispatcherPhase();
+    }
+
+    // ======================== 磁盘占用查询 ========================
+
+    /**
+     * 查询指定组的 Spool 磁盘占用即时拆分（见 {@link DiskUsage}）。
+     *
+     * @param groupKey 组 key，不可为 null
+     * @return 组不存在 / 未启动 / 关闭中 / 统计失败返回 null，不抛异常
+     */
+    public DiskUsage getSpoolUsage(String groupKey) {
+        Objects.requireNonNull(groupKey, "groupKey must not be null");
+        BatchWorkerGroup<?> group = groupMap.get(groupKey);
+        return group == null ? null : group.getSpoolUsage();
+    }
+
+    /**
+     * 查询全部组的 Spool 磁盘占用即时拆分（不可用组不出现在结果里）。
+     *
+     * @return 组 key → 占用拆分，不可变快照；无可用组时为空 map
+     */
+    public Map<String, DiskUsage> listSpoolUsages() {
+        Map<String, DiskUsage> result = new LinkedHashMap<>();
+        for (Map.Entry<String, BatchWorkerGroup<?>> entry : groupMap.entrySet()) {
+            DiskUsage usage = entry.getValue().getSpoolUsage();
+            if (usage != null) {
+                result.put(entry.getKey(), usage);
+            }
+        }
+        return result;
     }
 
     /** 按组 key 查找已注册组，不存在即抛（运维操作 fail fast） */

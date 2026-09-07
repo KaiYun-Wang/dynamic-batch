@@ -13,5 +13,8 @@ public enum NotifyTypeEnum {
     OFFER_FAILED,
 
     /** 批次执行失败告警：flush 回调抛异常（含 failureHandler 是否兜住的信息） */
-    FLUSH_FAILED
+    FLUSH_FAILED,
+
+    /** Spool 容量巡检告警（检测型）：定时巡检磁盘占用达预算阈值即触发，内容含已读未删 / 未读拆分 */
+    SPOOL_CAPACITY
 }

@@ -6,6 +6,7 @@ import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import com.dynamicbatch.core.serializer.SpoolEntrySerializer;
+import com.dynamicbatch.spool.DiskUsage;
 import com.dynamicbatch.spool.JdkSerializer;
 import com.dynamicbatch.spool.Serializer;
 import com.dynamicbatch.spool.Spool;
@@ -274,6 +275,24 @@ public class BatchWorkerGroup<T> {
     private void requireRunning() {
         if (!running) {
             throw new IllegalStateException("[" + key + "] group not started");
+        }
+    }
+
+    // ======================== 磁盘占用查询 ========================
+
+    /**
+     * 组 Spool 磁盘占用即时拆分（见 {@link DiskUsage}）。查询不抛异常：
+     * 未启动 / 关闭中返回 null 不触碰 Spool，异常也兜底返回 null。
+     */
+    DiskUsage getSpoolUsage() {
+        if (!running || spool == null) {
+            return null;
+        }
+        try {
+            return spool.diskUsage();
+        } catch (Exception e) {
+            log.warn("[{}] spool usage query failed", key, e);
+            return null;
         }
     }
 

@@ -60,7 +60,15 @@ dynamic-batch:
 #        receivers: ""  # 收件人地址，逗号分隔
 #        timeout: 3000
     notify-items:
+      # 所有告警显式才开：登记类型且 enabled: true 才投递，未登记/false 一律不发
       - type: offer_failed
+        enabled: true
         silence-period: 30       # 静默期（秒），30 秒内不再重复发送
       - type: flush_failed
+        enabled: true
         silence-period: 30
+      - type: spool_capacity     # 检测型：配合 test-batch/backlog 接口演示（backlog_demo 组预算 400MB）
+        enabled: true
+        threshold: 70            # 占磁盘预算百分比，达到即告警；未配置默认 70
+        interval-seconds: 5     # 巡检周期（秒），类型级配置（所有组共用）；未配置默认 60
+        silence-period: 5      # 持续超限冷却（秒），防每周期刷屏

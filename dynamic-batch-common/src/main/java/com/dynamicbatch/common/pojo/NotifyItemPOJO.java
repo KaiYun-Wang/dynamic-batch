@@ -5,13 +5,19 @@ package com.dynamicbatch.common.pojo;
  *
  * <p>描述"一种通知类型"的告警规则：对应 yml
  * {@code dynamic-batch.notify.notify-items} 中每一条配置。
- * {@code silencePeriod} 对所有类型生效（事件型告警防刷屏）；{@code threshold} 与
+ *
+ * <p>本列表中登记且 {@code enabled=true} 的类型才会发出告警，未登记或
+ * {@code enabled=false} 的类型一律不投递。
+ * {@code silencePeriod} 对所有类型生效（防刷屏）；{@code threshold} 与
  * {@code intervalSeconds} 供检测型告警读取（事件型告警配置了也不读取、不校验）。
  */
 public class NotifyItemPOJO {
 
     /** 通知类型，对应 NotifyTypeEnum 名称（大小写不敏感） */
     private String type;
+
+    /** 是否启用该类型告警：登记本项且置 true 才投递，默认 false */
+    private boolean enabled = false;
 
     /** 静默期秒数，上次发送后 N 秒内不再发送同类通知；0 表示不限流 */
     private long silencePeriod = 0;
@@ -28,6 +34,14 @@ public class NotifyItemPOJO {
 
     public void setType(String type) {
         this.type = type;
+    }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
     }
 
     public long getSilencePeriod() {
