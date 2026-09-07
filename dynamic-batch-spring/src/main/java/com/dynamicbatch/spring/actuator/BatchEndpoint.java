@@ -31,7 +31,7 @@ import java.util.concurrent.TimeoutException;
  * <pre>
  * GET  /actuator/dynamicbatch               全部组快照
  * GET  /actuator/dynamicbatch/{key}         单组快照
- * POST /actuator/dynamicbatch/{key}         参数热更：?batchSize=100&maxWaitMs=300，缺参 = 不改
+ * POST /actuator/dynamicbatch/{key}         参数热更：?batchSize=100&maxWaitMs=300&rateLimitPerSecond=50，缺参 = 不改
  * POST /actuator/dynamicbatch/{key}/pause   暂停调度器（异步意图，置相位即返回，data 为置位后的相位名）
  * POST /actuator/dynamicbatch/{key}/resume  恢复调度器（异步意图，data 为置位后的相位名）
  * POST /actuator/dynamicbatch/{key}/resize  改变分区数：?newSize=4&timeoutMs=5000；前置要求调度器已暂停
@@ -65,13 +65,14 @@ public class BatchEndpoint {
         return ApiResult.ok(snapshot);
     }
 
-    /** 参数热更：batchSize / maxWaitMs，缺参 = 不改；data 为热更后的组快照 */
+    /** 参数热更：batchSize / maxWaitMs / rateLimitPerSecond，缺参 = 不改；data 为热更后的组快照 */
     @PostMapping("/{key}")
     public ApiResult resizeGroupConfig(@PathVariable String key,
                                        @RequestParam(required = false) Integer batchSize,
-                                       @RequestParam(required = false) Long maxWaitMs) {
+                                       @RequestParam(required = false) Long maxWaitMs,
+                                       @RequestParam(required = false) Integer rateLimitPerSecond) {
         return invoke(() -> {
-            batchProcessor.resizeGroupConfig(key, batchSize, maxWaitMs);
+            batchProcessor.resizeGroupConfig(key, batchSize, maxWaitMs, rateLimitPerSecond);
             return batchProcessor.getGroupSnapshot(key);
         });
     }

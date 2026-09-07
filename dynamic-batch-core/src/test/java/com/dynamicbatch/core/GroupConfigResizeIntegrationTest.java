@@ -73,7 +73,7 @@ public class GroupConfigResizeIntegrationTest {
         assertEquals(2, batchSizes.get(0).intValue());
         assertEquals(2, batchSizes.get(1).intValue());
 
-        processor.resizeGroupConfig("config-batchsize", 4, null);
+        processor.resizeGroupConfig("config-batchsize", 4, null, null);
         for (int i = 4; i < 8; i++) {
             processor.submit("config-batchsize", "k", i);
         }
@@ -102,7 +102,7 @@ public class GroupConfigResizeIntegrationTest {
         Thread.sleep(400);
         assertEquals("长窗口内不应 flush", 0, batchSizes.size());
 
-        processor.resizeGroupConfig("config-maxwait", null, 200L);
+        processor.resizeGroupConfig("config-maxwait", null, 200L, null);
         awaitTrue(() -> !batchSizes.isEmpty(), 5_000, "改小 maxWaitMs 后应按新窗口 flush");
         assertEquals(3, batchSizes.get(0).intValue());
     }
@@ -113,15 +113,15 @@ public class GroupConfigResizeIntegrationTest {
         processor = new BatchProcessor();
         BatchWorkerGroup<Integer> group = registerEmptyGroup("config-null", 5, 100);
 
-        processor.resizeGroupConfig("config-null", null, null);
+        processor.resizeGroupConfig("config-null", null, null, null);
         assertEquals(5, group.getBatchSize());
         assertEquals(100, group.getMaxWaitMs());
 
-        processor.resizeGroupConfig("config-null", 7, null);
+        processor.resizeGroupConfig("config-null", 7, null, null);
         assertEquals(7, group.getBatchSize());
         assertEquals(100, group.getMaxWaitMs());
 
-        processor.resizeGroupConfig("config-null", null, 250L);
+        processor.resizeGroupConfig("config-null", null, 250L, null);
         assertEquals(7, group.getBatchSize());
         assertEquals(250, group.getMaxWaitMs());
     }
@@ -135,7 +135,7 @@ public class GroupConfigResizeIntegrationTest {
         int[] badBatchSizes = {-1, 0, group.getQueueCapacity() + 1};
         for (int bs : badBatchSizes) {
             try {
-                processor.resizeGroupConfig("config-invalid", bs, 500L);
+                processor.resizeGroupConfig("config-invalid", bs, 500L, null);
                 fail("expected IllegalArgumentException, batchSize=" + bs);
             } catch (IllegalArgumentException expected) {
                 // fail fast
@@ -145,7 +145,7 @@ public class GroupConfigResizeIntegrationTest {
         }
 
         try {
-            processor.resizeGroupConfig("config-invalid", null, -1L);
+            processor.resizeGroupConfig("config-invalid", null, -1L, null);
             fail("expected IllegalArgumentException");
         } catch (IllegalArgumentException expected) {
             // fail fast
@@ -163,7 +163,7 @@ public class GroupConfigResizeIntegrationTest {
                 .batchSize(5)
                 .build();
         try {
-            group.resizeGroupConfig(2, 100L);
+            group.resizeGroupConfig(2, 100L, null);
             fail("expected IllegalStateException");
         } catch (IllegalStateException expected) {
             // 组未启动
@@ -175,7 +175,7 @@ public class GroupConfigResizeIntegrationTest {
     public void unknownGroupKeyThrows() throws Exception {
         processor = new BatchProcessor();
         try {
-            processor.resizeGroupConfig("nope", 1, 1L);
+            processor.resizeGroupConfig("nope", 1, 1L, null);
             fail("expected IllegalArgumentException");
         } catch (IllegalArgumentException expected) {
             // fail fast

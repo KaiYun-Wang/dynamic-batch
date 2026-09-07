@@ -108,8 +108,9 @@ public class BatchWorkerGroup<T> {
         }
         // ① 构建 Spool（削峰蓄水池）：拿目录锁 + 起写线程，构造器失败路径自清理
         this.spool = buildSpool();
-        // ② 构建 Dispatcher（纯内存接线，不抛）：取数 = spool::poll，投递 = 私有 submitWorker
-        this.dispatcher = new Dispatcher<>(spool::poll, this::submitWorker);
+        // ② 构建 Dispatcher（纯内存接线，不抛）：取数 = spool::poll，投递 = 私有 submitWorker，
+        //    限速每轮读共享配置（热更生效）；config 为 null 时 Dispatcher 不限流，本组必有 config
+        this.dispatcher = new Dispatcher<>(spool::poll, this::submitWorker, config);
         // ③ 资源齐备才置 running：此后 start 序列不再有失败点，shutdown 的 running 检查不会碰 null
         running = true;
         // ④ 启动全部分区
@@ -306,7 +307,8 @@ public class BatchWorkerGroup<T> {
     GroupSnapshotVO snapshot() {
         Dispatcher.PausePhase phase = getDispatcherPhase();
         return new GroupSnapshotVO(key, running, config.getQueueCapacity(), config.getBatchSize(),
-                config.getMaxWaitMs(), partitions.size(), phase == null ? null : phase.name(),
+                config.getMaxWaitMs(), config.getRateLimitPerSecond(), partitions.size(),
+                phase == null ? null : phase.name(),
                 getPartitionQueueSizes(), getStagingSize(), getSpoolUsage());
     }
 
@@ -428,17 +430,24 @@ public class BatchWorkerGroup<T> {
         return config.getQueueCapacity();
     }
 
+    /** 当前组级投递限速（条/秒，组共享配置；null = 未配置即不限流） */
+    Integer getRateLimitPerSecond() {
+        return config.getRateLimitPerSecond();
+    }
+
     /**
-     * 运行时调整攒批参数：batchSize / maxWaitMs，null = 不改。合并后整体校验，
-     * 任一非法则配置不变；消费线程每轮读共享配置，下一批自动生效。
+     * 运行时调整组配置：batchSize / maxWaitMs / rateLimitPerSecond，null = 不改。
+     * 合并后整体校验，任一非法则配置不变；消费/分发线程每轮读共享配置，
+     * 下一批 / 下一投递起自动生效。
      *
      * @throws IllegalStateException    组未启动
-     * @throws IllegalArgumentException batchSize &lt;= 0、&gt; queueCapacity，或 maxWaitMs &lt; 0
+     * @throws IllegalArgumentException batchSize &lt;= 0、&gt; queueCapacity，maxWaitMs &lt; 0，或 rateLimitPerSecond &lt;= 0
      */
-    synchronized void resizeGroupConfig(Integer batchSize, Long maxWaitMs) {
+    synchronized void resizeGroupConfig(Integer batchSize, Long maxWaitMs, Integer rateLimitPerSecond) {
         requireRunning();
         int newBatchSize = batchSize != null ? batchSize : config.getBatchSize();
         long newMaxWaitMs = maxWaitMs != null ? maxWaitMs : config.getMaxWaitMs();
+        Integer newRateLimit = rateLimitPerSecond != null ? rateLimitPerSecond : config.getRateLimitPerSecond();
         if (newBatchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be > 0, got " + newBatchSize);
         }
@@ -449,9 +458,14 @@ public class BatchWorkerGroup<T> {
         if (newMaxWaitMs < 0) {
             throw new IllegalArgumentException("maxWaitMs must be >= 0, got " + newMaxWaitMs);
         }
+        if (newRateLimit != null && newRateLimit <= 0) {
+            throw new IllegalArgumentException("rateLimit must be > 0, got " + newRateLimit);
+        }
         config.setBatchSize(newBatchSize);
         config.setMaxWaitMs(newMaxWaitMs);
-        log.info("[{}] batch config updated, batchSize={}, maxWaitMs={}", key, newBatchSize, newMaxWaitMs);
+        config.setRateLimitPerSecond(newRateLimit);
+        log.info("[{}] batch config updated, batchSize={}, maxWaitMs={}, rateLimitPerSecond={}",
+                key, newBatchSize, newMaxWaitMs, newRateLimit);
     }
 
     // ======================== Builder ========================
@@ -527,6 +541,17 @@ public class BatchWorkerGroup<T> {
             return this;
         }
 
+        /**
+         * 组级投递限速（条/秒）：分发线程取数前睡足与上次取数的间隔，空闲期不积累突发；
+         * 运行时可用 {@code resizeGroupConfig} 热更。
+         *
+         * @param rateLimitPerSecond 每秒最多取数条数，必须 &gt; 0；不配置 = 不限流
+         */
+        public Builder<T> rateLimit(int rateLimitPerSecond) {
+            config.setRateLimitPerSecond(rateLimitPerSecond);
+            return this;
+        }
+
         public Builder<T> failureHandler(Consumer<List<T>> failureHandler) {
             this.failureHandler = failureHandler;
             return this;
@@ -541,6 +566,9 @@ public class BatchWorkerGroup<T> {
         public BatchWorkerGroup<T> build() {
             if (partitionCount <= 0) {
                 throw new IllegalArgumentException("partitionCount must be > 0, got " + partitionCount);
+            }
+            if (config.getRateLimitPerSecond() != null && config.getRateLimitPerSecond() <= 0) {
+                throw new IllegalArgumentException("rateLimit must be > 0, got " + config.getRateLimitPerSecond());
             }
             // L1：默认 JDK 序列化要求载荷可序列化，把失败从第一次 append 提前到启动期
             if (spoolConfig.getSerializer() == null && !Serializable.class.isAssignableFrom(type)) {

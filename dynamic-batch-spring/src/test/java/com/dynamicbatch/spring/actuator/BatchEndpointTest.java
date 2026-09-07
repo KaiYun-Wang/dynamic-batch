@@ -105,17 +105,29 @@ public class BatchEndpointTest {
     /** 参数热更成功：data 快照反映新值 */
     @Test(timeout = 30_000)
     public void resizeGroupConfigApplies() {
-        ApiResult result = endpoint.resizeGroupConfig(KEY, 3, 500L);
+        ApiResult result = endpoint.resizeGroupConfig(KEY, 3, 500L, null);
         assertEquals(200, result.getCode());
         GroupSnapshotVO snapshot = (GroupSnapshotVO) result.getData();
         assertEquals(3, snapshot.getBatchSize().intValue());
         assertEquals(500, snapshot.getMaxWaitMs().longValue());
     }
 
+    /** 限流热更：合法值 200 且快照带出新值，<= 0 映射 400 */
+    @Test(timeout = 30_000)
+    public void resizeGroupConfigRateLimit() {
+        ApiResult result = endpoint.resizeGroupConfig(KEY, null, null, 200);
+        assertEquals(200, result.getCode());
+        GroupSnapshotVO snapshot = (GroupSnapshotVO) result.getData();
+        assertEquals(200, snapshot.getRateLimitPerSecond().intValue());
+
+        assertEquals(400, endpoint.resizeGroupConfig(KEY, null, null, 0).getCode());
+        assertEquals(400, endpoint.resizeGroupConfig(KEY, null, null, -1).getCode());
+    }
+
     /** 非法参数（batchSize=0）映射 400 */
     @Test(timeout = 30_000)
     public void resizeGroupConfigInvalidReturns400() {
-        assertEquals(400, endpoint.resizeGroupConfig(KEY, 0, null).getCode());
+        assertEquals(400, endpoint.resizeGroupConfig(KEY, 0, null, null).getCode());
     }
 
     /** 未知 key 的运维操作映射 400（组不存在 fail fast） */
@@ -123,7 +135,7 @@ public class BatchEndpointTest {
     public void opsOnUnknownGroupReturn400() {
         assertEquals(400, endpoint.pause("nope").getCode());
         assertEquals(400, endpoint.resume("nope").getCode());
-        assertEquals(400, endpoint.resizeGroupConfig("nope", 3, null).getCode());
+        assertEquals(400, endpoint.resizeGroupConfig("nope", 3, null, null).getCode());
     }
 
     /** 暂停/恢复：返回置位后的相位，终态经快照查询确认 */

@@ -18,6 +18,8 @@ public class BatchWorkerGroupConfigPOJO {
     private volatile Integer batchSize;
     /** 最大等待毫秒，未攒满时最多等这么久再 flush（从收到第一条数据开始计时）；volatile 同 batchSize */
     private volatile Long maxWaitMs;
+    /** 组级投递限速（条/秒），null = 未配置即不限流（本字段不兑默认值）；volatile：分发线程每轮读，调参线程写 */
+    private volatile Integer rateLimitPerSecond;
 
     public Integer getQueueCapacity() {
         return queueCapacity;
@@ -41,5 +43,13 @@ public class BatchWorkerGroupConfigPOJO {
 
     public void setMaxWaitMs(Long maxWaitMs) {
         this.maxWaitMs = maxWaitMs;
+    }
+
+    public Integer getRateLimitPerSecond() {
+        return rateLimitPerSecond;
+    }
+
+    public void setRateLimitPerSecond(Integer rateLimitPerSecond) {
+        this.rateLimitPerSecond = rateLimitPerSecond;
     }
 }

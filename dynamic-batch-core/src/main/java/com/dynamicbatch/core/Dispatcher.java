@@ -1,6 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
+import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,6 +23,10 @@ import java.util.function.BiPredicate;
  * <p>投递为阻塞 put，队列满时在 {@code deliver} 内部等待空位；已 poll 的条目必须终结
  * （入队成功或毒丸丢弃）才离开，不看 {@code running}（关闭顺序为先 Dispatcher 后 Worker，
  * 关闭时 Worker 仍可接收投递）；仅当投递被放弃（强制关闭中断 / worker 已关闭）时结束线程。
+ *
+ * <p>限流（漏桶式匀速）：组配置限速后，取数前睡足与上次取数的间隔（空闲超间隔则不睡），
+ * 空闲期不积累突发；限速值每轮从共享配置现读，热更后下一次取数起生效。限流等待被强制
+ * 关闭中断 → 恢复中断标志结束线程，中断点无在途条目。
  *
  * <p>毒消息两层防线：poll 后反序列化/帧损坏抛异常 → 读位置已推进，打 error 日志后丢弃；
  * 投递时类型不匹配 → {@code deliver} 内部 error 丢弃，均继续循环。
@@ -68,6 +73,12 @@ class Dispatcher<T> {
      */
     private final BiPredicate<String, T> deliver;
 
+    /** 组共享配置（必存），限速值每轮读取；{@code rateLimitPerSecond} 为 null = 未配置不限流 */
+    private final BatchWorkerGroupConfigPOJO config;
+
+    /** 上次取数时刻（nanoTime 相对值），null = 尚未取数（首条不限）；仅分发线程访问，无并发 */
+    private Long lastPollNanos;
+
     /** 分发线程运行标志，{@code false} 时外层 {@link #dispatchLoop} 退出 */
     private volatile boolean running;
 
@@ -97,8 +108,17 @@ class Dispatcher<T> {
      * @param deliver 阻塞投到 Worker 的函数（测试用 lambda，生产为 {@code this::submitWorker}）
      */
     Dispatcher(Poller<T> poller, BiPredicate<String, T> deliver) {
+        this(poller, deliver, new BatchWorkerGroupConfigPOJO());
+    }
+
+    /**
+     * @param config 组共享配置（必填，限速值每轮读取，支持热更）；
+     *               {@code rateLimitPerSecond} 为 null = 未配置不限流
+     */
+    Dispatcher(Poller<T> poller, BiPredicate<String, T> deliver, BatchWorkerGroupConfigPOJO config) {
         this.poller = Objects.requireNonNull(poller, "poller must not be null");
         this.deliver = Objects.requireNonNull(deliver, "deliver must not be null");
+        this.config = Objects.requireNonNull(config, "config must not be null");
     }
 
     /**
@@ -199,7 +219,7 @@ class Dispatcher<T> {
 
             SpoolEntryPOJO<T> entry;
             try {
-                entry = poller.poll(POLL_LOCK_TIMEOUT_MS);
+                entry = pollWithRateLimit();
             } catch (TimeoutException e) {
                 continue;
             } catch (Exception e) {
@@ -222,8 +242,36 @@ class Dispatcher<T> {
     }
 
     /**
-     * 投递一条已 poll 的条目：返回 false 表示本条未投递（强制关闭中断 / worker 已关闭），
-     * warn 含 entry 摘要后置 {@code running=false} 结束线程。
+     * 带限流的取数：配置限速时先睡足与上次取数的间隔（空闲超间隔则不睡）再 poll，
+     * 取数前记录本次时刻闭环；未配置限速（null）或首条不限，直接 poll。
+     * 限流等待被强制关闭中断 → 恢复中断标志后返回 null，空轮 sleep 随即抛中断结束线程。
+     *
+     * @return 反序列化后的条目；队列为空或限流等待被中断返回 null
+     * @throws TimeoutException 获取读锁超时（并发读与文件清理冲突），非致命
+     */
+    private SpoolEntryPOJO<T> pollWithRateLimit() throws TimeoutException {
+        Integer rate = config.getRateLimitPerSecond();
+        if (rate != null) {
+            long intervalNanos = 1_000_000_000L / rate;
+            if (lastPollNanos != null) {
+                long wait = intervalNanos - (System.nanoTime() - lastPollNanos);
+                if (wait > 0) {
+                    try {
+                        Thread.sleep(wait / 1_000_000, (int) (wait % 1_000_000));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+                }
+            }
+            lastPollNanos = System.nanoTime();
+        }
+        return poller.poll(POLL_LOCK_TIMEOUT_MS);
+    }
+
+    /**
+     * 投递一条已 poll 的条目：{@code deliver} 返回 false（本条未投递：强制关闭中断 /
+     * worker 已关闭）时 warn 含 entry 摘要并置 {@code running=false} 结束线程。
      */
     private void deliverEntry(SpoolEntryPOJO<T> entry) {
         if (!deliver.test(entry.getRoutingKey(), entry.getPayload())) {

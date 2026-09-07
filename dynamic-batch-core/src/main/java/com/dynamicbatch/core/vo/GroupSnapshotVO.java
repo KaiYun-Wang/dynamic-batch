@@ -22,6 +22,8 @@ public final class GroupSnapshotVO {
     private final Integer batchSize;
     /** 最大等待毫秒 */
     private final Long maxWaitMs;
+    /** 组级投递限速（条/秒）；null = 未配置不限流 */
+    private final Integer rateLimitPerSecond;
     /** 分区数 */
     private final int partitionCount;
     /** 调度器相位：RUNNING / PAUSE_PENDING / PAUSED / RUN_PENDING；未启动为 null */
@@ -34,13 +36,15 @@ public final class GroupSnapshotVO {
     private final DiskUsage spoolUsage;
 
     public GroupSnapshotVO(String groupKey, boolean running, Integer queueCapacity, Integer batchSize,
-                           Long maxWaitMs, int partitionCount, String dispatcherPhase,
+                           Long maxWaitMs, Integer rateLimitPerSecond, int partitionCount,
+                           String dispatcherPhase,
                            List<Integer> queueSizes, Integer stagingSize, DiskUsage spoolUsage) {
         this.groupKey = groupKey;
         this.running = running;
         this.queueCapacity = queueCapacity;
         this.batchSize = batchSize;
         this.maxWaitMs = maxWaitMs;
+        this.rateLimitPerSecond = rateLimitPerSecond;
         this.partitionCount = partitionCount;
         this.dispatcherPhase = dispatcherPhase;
         this.queueSizes = queueSizes;
@@ -68,6 +72,10 @@ public final class GroupSnapshotVO {
         return maxWaitMs;
     }
 
+    public Integer getRateLimitPerSecond() {
+        return rateLimitPerSecond;
+    }
+
     public int getPartitionCount() {
         return partitionCount;
     }
@@ -92,7 +100,8 @@ public final class GroupSnapshotVO {
     public String toString() {
         return "GroupSnapshotVO{groupKey=" + groupKey + ", running=" + running
                 + ", queueCapacity=" + queueCapacity + ", batchSize=" + batchSize
-                + ", maxWaitMs=" + maxWaitMs + ", partitionCount=" + partitionCount
+                + ", maxWaitMs=" + maxWaitMs + ", rateLimitPerSecond=" + rateLimitPerSecond
+                + ", partitionCount=" + partitionCount
                 + ", dispatcherPhase=" + dispatcherPhase + ", queueSizes=" + queueSizes
                 + ", stagingSize=" + stagingSize + ", spoolUsage=" + spoolUsage + "}";
     }
