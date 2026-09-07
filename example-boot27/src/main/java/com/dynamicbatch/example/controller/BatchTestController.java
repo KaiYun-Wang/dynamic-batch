@@ -35,6 +35,9 @@ import java.util.concurrent.TimeoutException;
  * # flush 回调 sleep 5s 拖慢消费使积压保持；灌一次后每次巡检（5s）都会告警
  * curl "http://localhost:8080/test-batch/backlog/submit"
  * curl "http://localhost:8080/test-batch/backlog/usage"
+ *
+ * # 限流演示：rate_limit_demo 组限速 5 条/秒，投 20 条约 4 秒匀速消化（看 flush 日志节奏）
+ * curl "http://localhost:8080/test-batch/rate-limit/submit?count=20"
  * </pre>
  */
 @RestController
@@ -48,6 +51,10 @@ public class BatchTestController {
     /** 容量告警演示组：预算 40MB（小于一个预扩容文件 ~80MB，落盘即超阈值），1 秒滚动 */
     private static final String BACKLOG_GROUP_KEY = "backlog_demo";
     private static final long BACKLOG_MAX_SIZE_BYTES = 400L * 1024 * 1024;
+
+    /** 限流演示组：限速 5 条/秒，投递 count 条后可观察分发线程匀速取数消费 */
+    private static final String RATE_LIMIT_GROUP_KEY = "rate_limit_demo";
+    private static final int RATE_LIMIT_PER_SECOND = 5;
 
     private final BatchProcessor batchProcessor;
 
@@ -92,6 +99,19 @@ public class BatchTestController {
             log.info("容量告警演示组已注册, group={}, maxSizeBytes=40MB", BACKLOG_GROUP_KEY);
         } catch (IllegalStateException e) {
             log.warn("容量告警演示组已存在, 跳过注册: {}", e.getMessage());
+        }
+        try {
+            batchProcessor.registerGroup(RATE_LIMIT_GROUP_KEY,
+                    BatchWorkerGroup.builder(String.class,
+                            SpoolConfigPOJO.builder("spool-demo-rate-limit").build(),
+                            batch -> log.info("rate-limit flushed {} items: {}", batch.size(), batch))
+                            .batchSize(5)
+                            .maxWaitMs(1000)
+                            .rateLimit(RATE_LIMIT_PER_SECOND)
+                            .build());
+            log.info("限流演示组已注册, group={}, rateLimitPerSecond={}", RATE_LIMIT_GROUP_KEY, RATE_LIMIT_PER_SECOND);
+        } catch (IllegalStateException e) {
+            log.warn("限流演示组已存在, 跳过注册: {}", e.getMessage());
         }
     }
 
@@ -185,6 +205,36 @@ public class BatchTestController {
             result.put("ok", false);
             result.put("error", e.getMessage());
         }
+        return result;
+    }
+
+    /**
+     * 限流演示：往 rate_limit_demo 组投递 count 条（限速 5 条/秒）。
+     * submit 仅写 Spool 即返回，分发线程按限速匀速取数消费，
+     * count=20 约需 4 秒消化完，看 flush 日志节奏。
+     */
+    @GetMapping("/rate-limit/submit")
+    public Map<String, Object> rateLimitSubmit(@RequestParam int count) {
+        if (count <= 0 || count > 100_000) {
+            throw new IllegalArgumentException("count must be in (0, 100000], got " + count);
+        }
+        long start = System.currentTimeMillis();
+        int accepted = 0;
+        for (int i = 1; i <= count; i++) {
+            String data = String.valueOf(i);
+            if (batchProcessor.submit(RATE_LIMIT_GROUP_KEY, data, data)) {
+                accepted++;
+            }
+        }
+        long costMs = System.currentTimeMillis() - start;
+        log.info("rate limit submit done: total={}, accepted={}, costMs={}", count, accepted, costMs);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("groupKey", RATE_LIMIT_GROUP_KEY);
+        result.put("rateLimitPerSecond", RATE_LIMIT_PER_SECOND);
+        result.put("total", count);
+        result.put("accepted", accepted);
+        result.put("costMs", costMs);
         return result;
     }
 
