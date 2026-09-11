@@ -8,7 +8,8 @@ import java.util.List;
  * Worker 组运行快照：配置、分区、调度器相位、队列水位与磁盘占用的瞬时只读值。
  *
  * <p>各字段为独立时点读取，持续变化的字段（水位 / 占用 / 相位）之间无原子性保证。
- * 未启动组的 {@code dispatcherPhase} / {@code stagingSize} / {@code spoolUsage} 为 null。
+ * 未启动组的 {@code dispatcherPhase} / {@code stagingSize} / {@code spoolUsage} 为 null；
+ * {@code stats} 在组关闭后为最终累计值。
  */
 public final class GroupSnapshotVO {
 
@@ -34,11 +35,14 @@ public final class GroupSnapshotVO {
     private final Integer stagingSize;
     /** Spool 磁盘占用拆分；未启动为 null */
     private final DiskUsage spoolUsage;
+    /** 组级累计统计；组关闭后为最终累计值 */
+    private final CumulativeStatsVO stats;
 
     public GroupSnapshotVO(String groupKey, boolean running, Integer queueCapacity, Integer batchSize,
                            Long maxWaitMs, Integer rateLimitPerSecond, int partitionCount,
                            String dispatcherPhase,
-                           List<Integer> queueSizes, Integer stagingSize, DiskUsage spoolUsage) {
+                           List<Integer> queueSizes, Integer stagingSize, DiskUsage spoolUsage,
+                           CumulativeStatsVO stats) {
         this.groupKey = groupKey;
         this.running = running;
         this.queueCapacity = queueCapacity;
@@ -50,6 +54,7 @@ public final class GroupSnapshotVO {
         this.queueSizes = queueSizes;
         this.stagingSize = stagingSize;
         this.spoolUsage = spoolUsage;
+        this.stats = stats;
     }
 
     public String getGroupKey() {
@@ -96,6 +101,10 @@ public final class GroupSnapshotVO {
         return spoolUsage;
     }
 
+    public CumulativeStatsVO getStats() {
+        return stats;
+    }
+
     @Override
     public String toString() {
         return "GroupSnapshotVO{groupKey=" + groupKey + ", running=" + running
@@ -103,6 +112,7 @@ public final class GroupSnapshotVO {
                 + ", maxWaitMs=" + maxWaitMs + ", rateLimitPerSecond=" + rateLimitPerSecond
                 + ", partitionCount=" + partitionCount
                 + ", dispatcherPhase=" + dispatcherPhase + ", queueSizes=" + queueSizes
-                + ", stagingSize=" + stagingSize + ", spoolUsage=" + spoolUsage + "}";
+                + ", stagingSize=" + stagingSize + ", spoolUsage=" + spoolUsage
+                + ", stats=" + stats + "}";
     }
 }
