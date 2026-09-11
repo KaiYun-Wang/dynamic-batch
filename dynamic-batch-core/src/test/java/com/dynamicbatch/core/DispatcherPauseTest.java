@@ -1,6 +1,6 @@
 package com.dynamicbatch.core;
 
-import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import org.junit.Test;
 
 import java.util.concurrent.CountDownLatch;
@@ -43,11 +43,11 @@ public class DispatcherPauseTest {
         Dispatcher<String> dispatcher = new Dispatcher<>(
                 lockTimeoutMs -> {
                     if (pollCount.incrementAndGet() == 1) {
-                        return new SpoolEntryPOJO<>("k1", "v1");
+                        return new EnvelopePOJO<>("k1", "v1");
                     }
                     return null;
                 },
-                (routingKey, payload) -> {
+                envelope -> {
                     if (delivered.incrementAndGet() == 1) {
                         deliverStarted.countDown();
                         try {
@@ -83,7 +83,7 @@ public class DispatcherPauseTest {
                     pollCount.incrementAndGet();
                     return null;
                 },
-                (routingKey, payload) -> true);
+                envelope -> true);
         dispatcher.setName("test-pause-poll");
         dispatcher.start();
 
@@ -101,8 +101,8 @@ public class DispatcherPauseTest {
     public void resumeRestoresDelivery() throws Exception {
         AtomicInteger delivered = new AtomicInteger();
         Dispatcher<String> dispatcher = new Dispatcher<>(
-                lockTimeoutMs -> new SpoolEntryPOJO<>("k", "v" + System.nanoTime()),
-                (routingKey, payload) -> {
+                lockTimeoutMs -> new EnvelopePOJO<>("k", "v" + System.nanoTime()),
+                envelope -> {
                     delivered.incrementAndGet();
                     return true;
                 });
@@ -132,7 +132,7 @@ public class DispatcherPauseTest {
                     pollCount.incrementAndGet();
                     return null;
                 },
-                (routingKey, payload) -> true);
+                envelope -> true);
         dispatcher.setName("test-pause-idempotent");
         dispatcher.start();
 
@@ -164,8 +164,8 @@ public class DispatcherPauseTest {
             AtomicInteger delivered = new AtomicInteger();
 
             Dispatcher<String> dispatcher = new Dispatcher<>(
-                    lockTimeoutMs -> new SpoolEntryPOJO<>(key, "v"),
-                    (routingKey, payload) -> {
+                    lockTimeoutMs -> new EnvelopePOJO<>(key, "v"),
+                    envelope -> {
                         if (delivered.incrementAndGet() == 1) {
                             deliverStarted.countDown();
                             try {

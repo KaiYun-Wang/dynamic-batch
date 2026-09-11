@@ -19,16 +19,19 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
- * SpoolEntryPOJO 多序列化框架兼容矩阵：验证条目可被常见序列化方式直接编解码。
+ * EnvelopePOJO 多序列化框架兼容矩阵：验证信封可被常见序列化方式直接编解码。
  *
- * <p>背景：条目由框架信封序列化器落盘（payload 编解码委托使用方序列化器），但类形态本身
- * 必须对常见序列化框架全兼容——无论信封实现如何演进、条目以何种方式被外部框架处理都不踩坑。
+ * <p>背景：信封由框架序列化器落盘（payload 编解码委托使用方序列化器），但类形态本身
+ * 必须对常见序列化框架全兼容——无论信封实现如何演进、信封以何种方式被外部框架处理都不踩坑。
  * 本测试即形态契约：改类结构时此矩阵必须全绿。
  *
  * <p>覆盖：JDK 原生 / Kryo / Jackson(JSON) / MessagePack(jackson 后端) / Fastjson。
  * payload 泛型字段用 TypeReference 在测试侧绑定具体类型（框架处理泛型字段的标准做法）。
  */
-public class SpoolEntryPOJOSerializationTest {
+public class EnvelopePOJOSerializationTest {
+
+    /** 测试用固定提交时间戳（epoch 毫秒），三参构造器写入以锁定字段往返 */
+    private static final long SUBMIT_AT = 1725840000123L;
 
     /**
      * 测试载荷：模拟业务 data 类的标准形态（JavaBean）——用户选 JSON/MessagePack 等序列化方式时，
@@ -64,16 +67,17 @@ public class SpoolEntryPOJOSerializationTest {
         }
     }
 
-    private static SpoolEntryPOJO<Payload> sample() {
-        return new SpoolEntryPOJO<>("device-1", new Payload(42L, "gw-42"));
+    private static EnvelopePOJO<Payload> sample() {
+        return new EnvelopePOJO<>("device-1", new Payload(42L, "gw-42"), SUBMIT_AT);
     }
 
     /** 往返后字段一致性断言（各框架共用） */
-    private static void assertRoundTripped(SpoolEntryPOJO<Payload> back) {
+    private static void assertRoundTripped(EnvelopePOJO<Payload> back) {
         assertEquals("device-1", back.getRoutingKey());
         assertTrue("载荷类型应保持", back.getPayload() instanceof Payload);
         assertEquals(42L, back.getPayload().getId());
         assertEquals("gw-42", back.getPayload().getName());
+        assertEquals("提交时间戳应往返保持", SUBMIT_AT, back.getSubmitTimeMillis());
     }
 
     @Test
@@ -82,9 +86,9 @@ public class SpoolEntryPOJOSerializationTest {
         try (ObjectOutputStream oos = new ObjectOutputStream(bos)) {
             oos.writeObject(sample());
         }
-        SpoolEntryPOJO<Payload> back;
+        EnvelopePOJO<Payload> back;
         try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(bos.toByteArray()))) {
-            back = (SpoolEntryPOJO<Payload>) ois.readObject();
+            back = (EnvelopePOJO<Payload>) ois.readObject();
         }
         assertRoundTripped(back);
     }
@@ -93,7 +97,7 @@ public class SpoolEntryPOJOSerializationTest {
     public void kryo() {
         Kryo kryo = new Kryo();
         kryo.setRegistrationRequired(false);
-        kryo.register(SpoolEntryPOJO.class);
+        kryo.register(EnvelopePOJO.class);
         kryo.register(Payload.class);
 
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -103,7 +107,7 @@ public class SpoolEntryPOJOSerializationTest {
 
         Input input = new Input(new ByteArrayInputStream(bos.toByteArray()));
         @SuppressWarnings("unchecked")
-        SpoolEntryPOJO<Payload> back = (SpoolEntryPOJO<Payload>) kryo.readObject(input, SpoolEntryPOJO.class);
+        EnvelopePOJO<Payload> back = (EnvelopePOJO<Payload>) kryo.readObject(input, EnvelopePOJO.class);
         input.close();
 
         assertRoundTripped(back);
@@ -113,8 +117,8 @@ public class SpoolEntryPOJOSerializationTest {
     public void jackson() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         String json = mapper.writeValueAsString(sample());
-        SpoolEntryPOJO<Payload> back = mapper.readValue(
-                json, new com.fasterxml.jackson.core.type.TypeReference<SpoolEntryPOJO<Payload>>() {});
+        EnvelopePOJO<Payload> back = mapper.readValue(
+                json, new com.fasterxml.jackson.core.type.TypeReference<EnvelopePOJO<Payload>>() {});
         assertRoundTripped(back);
     }
 
@@ -122,16 +126,16 @@ public class SpoolEntryPOJOSerializationTest {
     public void messagePack() throws Exception {
         ObjectMapper mapper = new ObjectMapper(new MessagePackFactory());
         byte[] bytes = mapper.writeValueAsBytes(sample());
-        SpoolEntryPOJO<Payload> back = mapper.readValue(
-                bytes, new com.fasterxml.jackson.core.type.TypeReference<SpoolEntryPOJO<Payload>>() {});
+        EnvelopePOJO<Payload> back = mapper.readValue(
+                bytes, new com.fasterxml.jackson.core.type.TypeReference<EnvelopePOJO<Payload>>() {});
         assertRoundTripped(back);
     }
 
     @Test
     public void fastJson() {
         String json = JSON.toJSONString(sample());
-        SpoolEntryPOJO<Payload> back = JSON.parseObject(
-                json, new TypeReference<SpoolEntryPOJO<Payload>>() {});
+        EnvelopePOJO<Payload> back = JSON.parseObject(
+                json, new TypeReference<EnvelopePOJO<Payload>>() {});
         assertRoundTripped(back);
     }
 }

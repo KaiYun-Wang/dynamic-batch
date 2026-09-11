@@ -2,14 +2,14 @@ package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
-import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiPredicate;
+import java.util.function.Predicate;
 
 /**
  * Group 的分发线程：从 Spool poll 一条 → 阻塞投递到 Worker 队列 → 循环。
@@ -59,19 +59,19 @@ class Dispatcher<T> {
          * @return 反序列化后的条目；队列为空返回 null
          * @throws TimeoutException 获取读锁超时（并发读与文件清理冲突），非致命
          */
-        SpoolEntryPOJO<T> poll(long lockTimeoutMs) throws TimeoutException;
+        EnvelopePOJO<T> poll(long lockTimeoutMs) throws TimeoutException;
     }
 
     /** 取数函数，生产接线为 {@code spool::poll} */
     private final Poller<T> poller;
 
     /**
-     * 投递函数：将 routingKey + payload 投入 Worker 分区队列（阻塞 put），
+     * 投递函数：将信封整体（不拆包）投入 Worker 分区队列（阻塞 put），
      * 生产接线为 Group 的 {@code submitWorker}。
      * 返回 true = 本条已终结（入队成功或毒丸丢弃）；false = 本条未投递
      * （worker 已关闭 / 强制关闭中断），调用方应结束线程。
      */
-    private final BiPredicate<String, T> deliver;
+    private final Predicate<EnvelopePOJO<T>> deliver;
 
     /** 组共享配置（必存），限速值每轮读取；{@code rateLimitPerSecond} 为 null = 未配置不限流 */
     private final BatchWorkerGroupConfigPOJO config;
@@ -107,7 +107,7 @@ class Dispatcher<T> {
      * @param poller  从 Spool 取条的函数（测试用 lambda，生产为 {@code spool::poll}）
      * @param deliver 阻塞投到 Worker 的函数（测试用 lambda，生产为 {@code this::submitWorker}）
      */
-    Dispatcher(Poller<T> poller, BiPredicate<String, T> deliver) {
+    Dispatcher(Poller<T> poller, Predicate<EnvelopePOJO<T>> deliver) {
         this(poller, deliver, new BatchWorkerGroupConfigPOJO());
     }
 
@@ -115,7 +115,7 @@ class Dispatcher<T> {
      * @param config 组共享配置（必填，限速值每轮读取，支持热更）；
      *               {@code rateLimitPerSecond} 为 null = 未配置不限流
      */
-    Dispatcher(Poller<T> poller, BiPredicate<String, T> deliver, BatchWorkerGroupConfigPOJO config) {
+    Dispatcher(Poller<T> poller, Predicate<EnvelopePOJO<T>> deliver, BatchWorkerGroupConfigPOJO config) {
         this.poller = Objects.requireNonNull(poller, "poller must not be null");
         this.deliver = Objects.requireNonNull(deliver, "deliver must not be null");
         this.config = Objects.requireNonNull(config, "config must not be null");
@@ -217,7 +217,7 @@ class Dispatcher<T> {
                 continue;   // 切换失败（相位已变）：重读，勿直接取数
             }
 
-            SpoolEntryPOJO<T> entry;
+            EnvelopePOJO<T> entry;
             try {
                 entry = pollWithRateLimit();
             } catch (TimeoutException e) {
@@ -249,7 +249,7 @@ class Dispatcher<T> {
      * @return 反序列化后的条目；队列为空或限流等待被中断返回 null
      * @throws TimeoutException 获取读锁超时（并发读与文件清理冲突），非致命
      */
-    private SpoolEntryPOJO<T> pollWithRateLimit() throws TimeoutException {
+    private EnvelopePOJO<T> pollWithRateLimit() throws TimeoutException {
         Integer rate = config.getRateLimitPerSecond();
         if (rate != null) {
             long intervalNanos = 1_000_000_000L / rate;
@@ -270,11 +270,12 @@ class Dispatcher<T> {
     }
 
     /**
-     * 投递一条已 poll 的条目：{@code deliver} 返回 false（本条未投递：强制关闭中断 /
-     * worker 已关闭）时 warn 含 entry 摘要并置 {@code running=false} 结束线程。
+     * 投递一条已 poll 的信封（整封直达，不拆包）：{@code deliver} 返回 false
+     * （本条未投递：强制关闭中断 / worker 已关闭）时 warn 含 envelope 摘要并置
+     * {@code running=false} 结束线程。
      */
-    private void deliverEntry(SpoolEntryPOJO<T> entry) {
-        if (!deliver.test(entry.getRoutingKey(), entry.getPayload())) {
+    private void deliverEntry(EnvelopePOJO<T> entry) {
+        if (!deliver.test(entry)) {
             log.warn("[{}] deliver abandoned, dropping entry on shutdown: {}", name, entry);
             running = false;
         }

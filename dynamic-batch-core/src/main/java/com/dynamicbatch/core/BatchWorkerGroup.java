@@ -2,10 +2,10 @@ package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
-import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
-import com.dynamicbatch.core.serializer.SpoolEntrySerializer;
+import com.dynamicbatch.core.serializer.EnvelopeSerializer;
 import com.dynamicbatch.core.vo.GroupSnapshotVO;
 import com.dynamicbatch.spool.DiskUsage;
 import com.dynamicbatch.spool.JdkSerializer;
@@ -63,7 +63,7 @@ public class BatchWorkerGroup<T> {
     private volatile boolean shuttingDown;
 
     /** 磁盘缓冲（削峰蓄水池），start() 时按 spoolConfig 构建；未 start 的组为 null */
-    private Spool<SpoolEntryPOJO<T>> spool;
+    private Spool<EnvelopePOJO<T>> spool;
 
     /** 分发线程：从 Spool poll 并路由投递到 Worker 队列，start() 时构建接线；未 start 的组为 null */
     private Dispatcher<T> dispatcher;
@@ -127,18 +127,18 @@ public class BatchWorkerGroup<T> {
     }
 
     /**
-     * 按 spoolConfig 构建 {@code Spool<SpoolEntryPOJO<T>>}（信封序列化器外封 routingKey，
-     * 使用方序列化器只管载荷）。非空字段才调对应 Builder 链式方法，null 走 Spool 默认值，
-     * 两边默认值不重复维护；泛型擦除的 unchecked 强转收敛到本方法。
+     * 按 spoolConfig 构建 {@code Spool<EnvelopePOJO<T>>}（信封序列化器外封 routingKey 与
+     * 提交时间戳，使用方序列化器只管载荷）。非空字段才调对应 Builder 链式方法，null 走 Spool
+     * 默认值，两边默认值不重复维护；泛型擦除的 unchecked 强转收敛到本方法。
      * spoolConfig 非泛型：载荷类型由本类 type 统一提供，serializer 类型错配由双重 isInstance 兜底。
      */
     @SuppressWarnings("unchecked")
-    private Spool<SpoolEntryPOJO<T>> buildSpool() {
-        Class<SpoolEntryPOJO<T>> entryType = (Class<SpoolEntryPOJO<T>>) (Class<?>) SpoolEntryPOJO.class;
+    private Spool<EnvelopePOJO<T>> buildSpool() {
+        Class<EnvelopePOJO<T>> entryType = (Class<EnvelopePOJO<T>>) (Class<?>) EnvelopePOJO.class;
         Serializer<T> payload = (Serializer<T>) (spoolConfig.getSerializer() != null
                 ? spoolConfig.getSerializer() : new JdkSerializer<T>());
-        Serializer<SpoolEntryPOJO<T>> envelope = new SpoolEntrySerializer<>(type, payload);
-        Spool.Builder<SpoolEntryPOJO<T>> builder = Spool.builder(entryType, spoolConfig.getSpoolDir(), envelope);
+        Serializer<EnvelopePOJO<T>> envelope = new EnvelopeSerializer<>(type, payload);
+        Spool.Builder<EnvelopePOJO<T>> builder = Spool.builder(entryType, spoolConfig.getSpoolDir(), envelope);
         if (spoolConfig.getMaxSizeBytes() != null) {
             builder.maxSizeBytes(spoolConfig.getMaxSizeBytes());
         }
@@ -194,7 +194,8 @@ public class BatchWorkerGroup<T> {
             return false;
         }
         try {
-            boolean ok = spool.append(new SpoolEntryPOJO<>(routingKey, data));
+            // 信封构造即打提交时间戳
+            boolean ok = spool.append(new EnvelopePOJO<>(routingKey, data));
             if (!ok) {
                 log.warn("[{}] spool append rejected, stagingSize={}", key, spool.stagingSize());
                 NotifyManager.getInstance().tryNoticeOfferFailedAsync(key,
@@ -211,10 +212,10 @@ public class BatchWorkerGroup<T> {
         }
     }
 
-    /** 分发线程投递入口：按 routingKey 路由到固定分区并阻塞投递（Dispatcher 接线 {@code this::submitWorker}） */
-    boolean submitWorker(String routingKey, T data) {
+    /** 分发线程投递入口：按信封 routingKey 路由到固定分区，整封阻塞投递（Dispatcher 接线 {@code this::submitWorker}） */
+    boolean submitWorker(EnvelopePOJO<T> envelope) {
         List<BatchWorker<T>> snapshot = partitions;   // 局部快照：size 与 get 必然同代，替换中间态不可见
-        return snapshot.get(Math.floorMod(routingKey.hashCode(), snapshot.size())).submit(data);
+        return snapshot.get(Math.floorMod(envelope.getRoutingKey().hashCode(), snapshot.size())).submit(envelope);
     }
 
     /**

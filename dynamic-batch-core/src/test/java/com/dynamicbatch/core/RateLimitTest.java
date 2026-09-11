@@ -1,7 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
-import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import org.junit.Rule;
 import org.junit.Test;
@@ -53,9 +53,9 @@ public class RateLimitTest {
 
     /** 假 poller：按脚本逐条返回，取完返回 null */
     private static Dispatcher.Poller<String> scriptedPoller(int total) {
-        List<SpoolEntryPOJO<String>> scripted = new ArrayList<>();
+        List<EnvelopePOJO<String>> scripted = new ArrayList<>();
         for (int i = 0; i < total; i++) {
-            scripted.add(new SpoolEntryPOJO<>("k", "v" + i));
+            scripted.add(new EnvelopePOJO<>("k", "v" + i));
         }
         AtomicInteger pollIndex = new AtomicInteger();
         return lockTimeoutMs -> {
@@ -70,8 +70,8 @@ public class RateLimitTest {
         List<String> delivered = new ArrayList<>();
         Dispatcher<String> dispatcher = new Dispatcher<>(
                 scriptedPoller(10),
-                (routingKey, payload) -> {
-                    delivered.add(payload);
+                envelope -> {
+                    delivered.add(envelope.getPayload());
                     return true;
                 },
                 rateLimitConfig(RATE_SLOW));
@@ -93,8 +93,8 @@ public class RateLimitTest {
         List<String> delivered = new ArrayList<>();
         Dispatcher<String> dispatcher = new Dispatcher<>(
                 scriptedPoller(100),
-                (routingKey, payload) -> {
-                    delivered.add(payload);
+                envelope -> {
+                    delivered.add(envelope.getPayload());
                     return true;
                 },
                 rateLimitConfig(null));
@@ -116,8 +116,8 @@ public class RateLimitTest {
         List<String> delivered = new ArrayList<>();
         Dispatcher<String> dispatcher = new Dispatcher<>(
                 scriptedPoller(25),
-                (routingKey, payload) -> {
-                    delivered.add(payload);
+                envelope -> {
+                    delivered.add(envelope.getPayload());
                     return true;
                 },
                 config);
