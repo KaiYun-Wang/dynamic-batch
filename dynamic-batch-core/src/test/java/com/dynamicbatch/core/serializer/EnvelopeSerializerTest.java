@@ -1,6 +1,6 @@
 package com.dynamicbatch.core.serializer;
 
-import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.spool.Serializer;
 import org.junit.Ignore;
 import org.junit.Test;
@@ -17,7 +17,7 @@ import static org.junit.Assert.fail;
 /**
  * 信封序列化器测试：帧格式锁定 + round-trip + 坏帧契约。
  */
-public class SpoolEntrySerializerTest {
+public class EnvelopeSerializerTest {
 
     private static Serializer<String> utf8PayloadSerializer() {
         return new Serializer<String>() {
@@ -35,26 +35,32 @@ public class SpoolEntrySerializerTest {
 
     /**
      * 肉眼查看落盘字节：去掉 {@link Ignore} 后单独运行本方法。
-     * {@code mvn -pl dynamic-batch-core test -Dtest=SpoolEntrySerializerTest#frameHexDumpDemo}
+     * {@code mvn -pl dynamic-batch-core test -Dtest=EnvelopeSerializerTest#frameHexDumpDemo}
      */
     @Ignore("手动运行看序列化效果，不纳入常规 CI")
     @Test
     public void frameHexDumpDemo() {
-        SpoolEntrySerializer<String> serializer =
-                new SpoolEntrySerializer<>(String.class, utf8PayloadSerializer());
-        SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("device-1", "hello");
-        byte[] bytes = serializer.serialize(entry);
+        EnvelopeSerializer<String> serializer =
+                new EnvelopeSerializer<>(String.class, utf8PayloadSerializer());
+        EnvelopePOJO<String> envelope = new EnvelopePOJO<>("device-1", "hello", 1725840000123L);
+        byte[] bytes = serializer.serialize(envelope);
 
-        System.out.println("输入: routingKey=\"" + entry.getRoutingKey() + "\", payload=\"" + entry.getPayload() + "\"");
+        System.out.println("输入: routingKey=\"" + envelope.getRoutingKey()
+                + "\", submitTimeMillis=" + envelope.getSubmitTimeMillis()
+                + ", payload=\"" + envelope.getPayload() + "\"");
         System.out.println("总长度: " + bytes.length + " 字节\n");
 
-        int keyLen = ByteBuffer.wrap(bytes, 0, 4).getInt();
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        int keyLen = buffer.getInt();
         System.out.println("① key 长度 (4B): " + toHex(bytes, 0, 4) + "  → int = " + keyLen);
         System.out.println("② routingKey (" + keyLen + "B): " + toHex(bytes, 4, keyLen)
                 + "  → \"" + new String(bytes, 4, keyLen, StandardCharsets.UTF_8) + "\"");
-        System.out.println("③ payload (" + (bytes.length - 4 - keyLen) + "B): "
-                + toHex(bytes, 4 + keyLen, bytes.length - 4 - keyLen)
-                + "  → \"" + new String(bytes, 4 + keyLen, bytes.length - 4 - keyLen, StandardCharsets.UTF_8) + "\"");
+        System.out.println("③ submitTimeMillis (8B): " + toHex(bytes, 4 + keyLen, 8)
+                + "  → long = " + buffer.getLong(4 + keyLen));
+        int payloadOffset = 4 + keyLen + 8;
+        System.out.println("④ payload (" + (bytes.length - payloadOffset) + "B): "
+                + toHex(bytes, payloadOffset, bytes.length - payloadOffset)
+                + "  → \"" + new String(bytes, payloadOffset, bytes.length - payloadOffset, StandardCharsets.UTF_8) + "\"");
         System.out.println("\n完整报文: " + toHex(bytes, 0, bytes.length));
     }
 
@@ -71,15 +77,17 @@ public class SpoolEntrySerializerTest {
 
     @Test
     public void frameLayoutLocks() {
-        SpoolEntrySerializer<String> serializer =
-                new SpoolEntrySerializer<>(String.class, utf8PayloadSerializer());
-        byte[] bytes = serializer.serialize(new SpoolEntryPOJO<>("k1", "v1"));
+        long submitAt = 1725840000123L;
+        EnvelopeSerializer<String> serializer =
+                new EnvelopeSerializer<>(String.class, utf8PayloadSerializer());
+        byte[] bytes = serializer.serialize(new EnvelopePOJO<>("k1", "v1", submitAt));
 
         ByteBuffer buffer = ByteBuffer.wrap(bytes);
         assertEquals(2, buffer.getInt());
         byte[] keyBytes = new byte[2];
         buffer.get(keyBytes);
         assertArrayEquals("k1".getBytes(StandardCharsets.UTF_8), keyBytes);
+        assertEquals("帧第③段应为 8 字节提交时间戳", submitAt, buffer.getLong());
         byte[] payloadBytes = new byte[buffer.remaining()];
         buffer.get(payloadBytes);
         assertArrayEquals("v1".getBytes(StandardCharsets.UTF_8), payloadBytes);
@@ -103,32 +111,34 @@ public class SpoolEntrySerializerTest {
             }
         };
 
-        SpoolEntrySerializer<String> serializer =
-                new SpoolEntrySerializer<>(String.class, countingPayloadSerializer);
-        SpoolEntryPOJO<String> original = new SpoolEntryPOJO<>("route-a", "payload-a");
-        SpoolEntryPOJO<String> back = serializer.deserialize(serializer.serialize(original), null);
+        EnvelopeSerializer<String> serializer =
+                new EnvelopeSerializer<>(String.class, countingPayloadSerializer);
+        EnvelopePOJO<String> original = new EnvelopePOJO<>("route-a", "payload-a");
+        EnvelopePOJO<String> back = serializer.deserialize(serializer.serialize(original), null);
 
         assertEquals("route-a", back.getRoutingKey());
         assertEquals("payload-a", back.getPayload());
+        assertEquals("提交时间戳应往返保持", original.getSubmitTimeMillis(), back.getSubmitTimeMillis());
         assertEquals(1, serializeCount.get());
         assertEquals(1, deserializeCount.get());
     }
 
     @Test
     public void multiByteKeyRoundTrip() {
-        SpoolEntrySerializer<String> serializer =
-                new SpoolEntrySerializer<>(String.class, utf8PayloadSerializer());
-        SpoolEntryPOJO<String> original = new SpoolEntryPOJO<>("设备-1", "data");
-        SpoolEntryPOJO<String> back = serializer.deserialize(serializer.serialize(original), null);
+        EnvelopeSerializer<String> serializer =
+                new EnvelopeSerializer<>(String.class, utf8PayloadSerializer());
+        EnvelopePOJO<String> original = new EnvelopePOJO<>("设备-1", "data");
+        EnvelopePOJO<String> back = serializer.deserialize(serializer.serialize(original), null);
 
         assertEquals("设备-1", back.getRoutingKey());
         assertEquals("data", back.getPayload());
+        assertEquals("提交时间戳应往返保持", original.getSubmitTimeMillis(), back.getSubmitTimeMillis());
     }
 
     @Test
     public void corruptedFrameThrowsRuntime() {
-        SpoolEntrySerializer<String> serializer =
-                new SpoolEntrySerializer<>(String.class, utf8PayloadSerializer());
+        EnvelopeSerializer<String> serializer =
+                new EnvelopeSerializer<>(String.class, utf8PayloadSerializer());
         byte[] truncated = new byte[]{0, 0, 0, 2, 'k'};
         try {
             serializer.deserialize(truncated, null);
@@ -143,6 +153,20 @@ public class SpoolEntrySerializerTest {
             fail("expected exception");
         } catch (Exception expected) {
             assertTrue(true);
+        }
+    }
+
+    @Test
+    public void absurdKeyLenFailsFast() {
+        // 荒谬 keyLen（如被截断/错位帧误读出超大值）必须在分配前快速失败，防其放大成 OOM
+        EnvelopeSerializer<String> serializer =
+                new EnvelopeSerializer<>(String.class, utf8PayloadSerializer());
+        byte[] absurd = ByteBuffer.allocate(4).putInt(Integer.MAX_VALUE).array();
+        try {
+            serializer.deserialize(absurd, null);
+            fail("absurd key length should fail fast");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("out of range"));
         }
     }
 }

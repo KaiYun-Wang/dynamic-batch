@@ -1,6 +1,6 @@
 package com.dynamicbatch.core;
 
-import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -22,10 +22,10 @@ public class DispatcherTest {
 
     @Test
     public void deliversEachEntryOnce() throws Exception {
-        List<SpoolEntryPOJO<String>> scripted = new ArrayList<>();
-        scripted.add(new SpoolEntryPOJO<>("k1", "v1"));
-        scripted.add(new SpoolEntryPOJO<>("k2", "v2"));
-        scripted.add(new SpoolEntryPOJO<>("k3", "v3"));
+        List<EnvelopePOJO<String>> scripted = new ArrayList<>();
+        scripted.add(new EnvelopePOJO<>("k1", "v1"));
+        scripted.add(new EnvelopePOJO<>("k2", "v2"));
+        scripted.add(new EnvelopePOJO<>("k3", "v3"));
         AtomicInteger pollIndex = new AtomicInteger();
         List<String> deliveredKeys = new ArrayList<>();
 
@@ -37,8 +37,8 @@ public class DispatcherTest {
                     }
                     return null;
                 },
-                (routingKey, payload) -> {
-                    deliveredKeys.add(routingKey);
+                envelope -> {
+                    deliveredKeys.add(envelope.getRoutingKey());
                     return true;
                 });
         dispatcher.setName("test-deliver-once");
@@ -59,7 +59,7 @@ public class DispatcherTest {
      */
     @Test
     public void deliverAbandonedExitsThread() throws Exception {
-        SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("stuck-key", "stuck-value");
+        EnvelopePOJO<String> entry = new EnvelopePOJO<>("stuck-key", "stuck-value");
         CountDownLatch pollStarted = new CountDownLatch(1);
         AtomicBoolean release = new AtomicBoolean();
 
@@ -77,7 +77,7 @@ public class DispatcherTest {
                     }
                     return entry;
                 },
-                (routingKey, payload) -> false);
+                envelope -> false);
 
         dispatcher.setName("test-abandon");
         dispatcher.start();
@@ -100,7 +100,7 @@ public class DispatcherTest {
                     pollCount.incrementAndGet();
                     return null;
                 },
-                (routingKey, payload) -> true);
+                envelope -> true);
 
         dispatcher.setName("test-empty-poll");
         dispatcher.start();
@@ -114,7 +114,7 @@ public class DispatcherTest {
     @Test
     public void lockTimeoutContinuesLoop() throws Exception {
         AtomicInteger pollCount = new AtomicInteger();
-        SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("after-timeout", "v");
+        EnvelopePOJO<String> entry = new EnvelopePOJO<>("after-timeout", "v");
         List<String> delivered = new ArrayList<>();
 
         Dispatcher<String> dispatcher = new Dispatcher<>(
@@ -127,8 +127,8 @@ public class DispatcherTest {
                     }
                     return null;
                 },
-                (routingKey, payload) -> {
-                    delivered.add(routingKey);
+                envelope -> {
+                    delivered.add(envelope.getRoutingKey());
                     return true;
                 });
 
@@ -145,7 +145,7 @@ public class DispatcherTest {
     @Test
     public void corruptedEntryDroppedAndLoopSurvives() throws Exception {
         AtomicInteger pollCount = new AtomicInteger();
-        SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("after-corrupt", "v");
+        EnvelopePOJO<String> entry = new EnvelopePOJO<>("after-corrupt", "v");
         List<String> delivered = new ArrayList<>();
 
         Dispatcher<String> dispatcher = new Dispatcher<>(
@@ -158,8 +158,8 @@ public class DispatcherTest {
                     }
                     return null;
                 },
-                (routingKey, payload) -> {
-                    delivered.add(routingKey);
+                envelope -> {
+                    delivered.add(envelope.getRoutingKey());
                     return true;
                 });
 
@@ -177,13 +177,13 @@ public class DispatcherTest {
      */
     @Test
     public void interruptDuringBlockingDeliverExitsThread() throws Exception {
-        SpoolEntryPOJO<String> entry = new SpoolEntryPOJO<>("stuck-key", "stuck-value");
+        EnvelopePOJO<String> entry = new EnvelopePOJO<>("stuck-key", "stuck-value");
         AtomicBoolean polled = new AtomicBoolean();
         CountDownLatch deliverStarted = new CountDownLatch(1);
 
         Dispatcher<String> dispatcher = new Dispatcher<>(
                 lockTimeoutMs -> polled.compareAndSet(false, true) ? entry : null,
-                (routingKey, payload) -> {
+                envelope -> {
                     deliverStarted.countDown();
                     try {
                         new CountDownLatch(1).await();   // 模拟阻塞 put（永不放行）
@@ -211,7 +211,7 @@ public class DispatcherTest {
     public void stopIsIdempotent() throws Exception {
         Dispatcher<String> dispatcher = new Dispatcher<>(
                 lockTimeoutMs -> null,
-                (routingKey, payload) -> true);
+                envelope -> true);
         dispatcher.setName("test-stop-idempotent");
         dispatcher.start();
         dispatcher.stop();

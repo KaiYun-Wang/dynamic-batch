@@ -1,5 +1,6 @@
 package com.dynamicbatch.example.controller;
 
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.BatchProcessor;
 import com.dynamicbatch.core.BatchWorker;
 import com.dynamicbatch.core.BatchWorkerGroup;
@@ -162,7 +163,8 @@ public class NotifyFailureTestController {
                     return;
                 }
                 for (int j = 0; j < perThread; j++) {
-                    boolean success = slowConsumerWorker.submit("data-" + j);
+                    // 自持 worker 直灌信封
+                    boolean success = slowConsumerWorker.submit(new EnvelopePOJO<>("slow-consumer", "data-" + j));
                     if (success) {
                         ok.incrementAndGet();
                     } else {
@@ -188,7 +190,7 @@ public class NotifyFailureTestController {
     /** 入队失败：worker 已关闭（自持 worker 未 start） */
     @PostMapping("/offer-stopped")
     public String offerStopped() {
-        boolean ok = stoppedWorker.submit("data");
+        boolean ok = stoppedWorker.submit(new EnvelopePOJO<>("stopped", "data"));
         return "提交返回=" + ok + "（应为 false，已触发 worker 已关闭告警）";
     }
 
@@ -226,8 +228,8 @@ public class NotifyFailureTestController {
     /** 批次执行失败：flush 抛异常，failureHandler 接管（消息应显示无丢失风险） */
     @PostMapping("/flush-error")
     public String flushError() throws InterruptedException {
-        flushFailWorker.submit("a");
-        flushFailWorker.submit("b"); // 攒满 2 条立即 flush → 抛异常 → failureHandler 接管
+        flushFailWorker.submit(new EnvelopePOJO<>("flush-fail", "a"));
+        flushFailWorker.submit(new EnvelopePOJO<>("flush-fail", "b")); // 攒满 2 条立即 flush → 抛异常 → failureHandler 接管
         Thread.sleep(1500);          // 等异步通知发出
         return "已触发 flush 失败（failureHandler 接管），查看钉钉/日志";
     }
@@ -235,8 +237,8 @@ public class NotifyFailureTestController {
     /** 批次执行失败：flush 抛异常且无 failureHandler（消息应显示数据丢失风险） */
     @PostMapping("/flush-error-loss")
     public String flushErrorLoss() throws InterruptedException {
-        flushFailLossWorker.submit("a");
-        flushFailLossWorker.submit("b"); // 攒满 2 条立即 flush → 抛异常 → 无兜底
+        flushFailLossWorker.submit(new EnvelopePOJO<>("flush-loss", "a"));
+        flushFailLossWorker.submit(new EnvelopePOJO<>("flush-loss", "b")); // 攒满 2 条立即 flush → 抛异常 → 无兜底
         Thread.sleep(1500);
         return "已触发 flush 失败（无 failureHandler，数据丢失风险），查看钉钉/日志";
     }

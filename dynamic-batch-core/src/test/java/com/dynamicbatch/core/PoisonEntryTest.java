@@ -1,5 +1,6 @@
 package com.dynamicbatch.core;
 
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import com.dynamicbatch.spool.Serializer;
 import org.junit.After;
@@ -57,13 +58,14 @@ public class PoisonEntryTest {
         worker.setName("test-poison-worker");
         worker.start();
 
-        // raw type 绕过编译期泛型检查，模拟反序列化出的类型错配（序列化器 bug / 升级续读）
+        // raw type 绕过编译期泛型检查，模拟反序列化出的类型错配（序列化器 bug / 升级续读）：
+        // 信封 key 正常、载荷类型谎报，Worker 校验载荷时丢弃
         @SuppressWarnings({"rawtypes", "unchecked"})
-        boolean terminated = ((BatchWorker) worker).submit(Integer.valueOf(42));
+        boolean terminated = ((BatchWorker) worker).submit(new EnvelopePOJO("poison-key", Integer.valueOf(42)));
         assertTrue("毒丸应视为已终结（丢弃），投递方可继续", terminated);
 
-        assertTrue(worker.submit("a"));
-        assertTrue(worker.submit("b"));
+        assertTrue(worker.submit(new EnvelopePOJO<>("k1", "a")));
+        assertTrue(worker.submit(new EnvelopePOJO<>("k1", "b")));
         awaitFlushed(2, flushed, 5_000);
         assertEquals("毒丸不应出现在 flush 结果", Arrays.asList("a", "b"), flushed);
 
