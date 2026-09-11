@@ -4,6 +4,7 @@ import com.dynamicbatch.common.constants.BatchWorkerConstant;
 import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
+import com.dynamicbatch.core.stats.CumulativeStats;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +38,8 @@ public class BatchWorker<T> {
     private final LinkedBlockingQueue<EnvelopePOJO<T>> queue;
     /** 组共享配置（与 BatchWorkerGroup 同一实例），构建期锁定 */
     private final BatchWorkerGroupConfigPOJO config;
+    /** 组级累计统计（组共享同一实例，独立构建为 null 不统计） */
+    private final CumulativeStats stats;
     private final Consumer<List<T>> flushCallback;
     private final Consumer<List<T>> failureHandler;
 
@@ -51,13 +54,14 @@ public class BatchWorker<T> {
      * {@link Builder#build()} 也走本构造器。校验失败抛 {@link IllegalArgumentException}。
      */
     BatchWorker(Class<T> type, Consumer<List<T>> flushCallback, Consumer<List<T>> failureHandler,
-                 BatchWorkerGroupConfigPOJO config) {
+                 BatchWorkerGroupConfigPOJO config, CumulativeStats stats) {
         validateConfig(config);
         this.type = Objects.requireNonNull(type, "type must not be null");
         this.queue = new LinkedBlockingQueue<>(config.getQueueCapacity());
         this.flushCallback = Objects.requireNonNull(flushCallback, "flushCallback must not be null");
         this.failureHandler = failureHandler;
         this.config = config;
+        this.stats = stats;
     }
 
     public void setName(String name) {
@@ -192,6 +196,9 @@ public class BatchWorker<T> {
                 }
                 // clamp 0 防 NTP 回拨；rt=0（同毫秒完成）是正常值
                 long rt = Math.max(0, finishAt - submitAt);
+                if (stats != null) {
+                    stats.recordCallback(rt);
+                }
                 if (log.isDebugEnabled()) {
                     log.debug("[{}] entry rt={}ms, key={}", name, rt, envelope.getRoutingKey());
                 }
@@ -374,7 +381,7 @@ public class BatchWorker<T> {
          * 构建 {@code BatchWorker} 实例，执行参数校验。
          */
         public BatchWorker<T> build() {
-            return new BatchWorker<>(type, flushCallback, failureHandler, config);
+            return new BatchWorker<>(type, flushCallback, failureHandler, config, null);
         }
     }
 }

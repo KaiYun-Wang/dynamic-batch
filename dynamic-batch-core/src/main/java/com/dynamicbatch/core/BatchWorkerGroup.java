@@ -6,6 +6,8 @@ import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import com.dynamicbatch.core.serializer.EnvelopeSerializer;
+import com.dynamicbatch.core.stats.CumulativeStats;
+import com.dynamicbatch.core.vo.CumulativeStatsVO;
 import com.dynamicbatch.core.vo.GroupSnapshotVO;
 import com.dynamicbatch.spool.DiskUsage;
 import com.dynamicbatch.spool.JdkSerializer;
@@ -71,6 +73,9 @@ public class BatchWorkerGroup<T> {
     /** Spool 配置（必传，编译期强制，spoolDir 必填；非泛型——载荷类型由本类 type 统一决定），start() 时据此构建 Spool */
     private final SpoolConfigPOJO spoolConfig;
 
+    /** 组级累计统计（默认桶边界），全部分区 Worker 共享同一实例 */
+    private final CumulativeStats stats = new CumulativeStats(CumulativeStats.defaultBoundaries());
+
     private BatchWorkerGroup(Builder<T> builder) {
         this.type = builder.type;
         this.flushCallback = builder.flushCallback;
@@ -80,7 +85,7 @@ public class BatchWorkerGroup<T> {
         // 共享同一 config 实例：分区 Worker 不复制配置，组级公共字段经此对象读取
         List<BatchWorker<T>> initial = new ArrayList<>(builder.partitionCount);
         for (int i = 0; i < builder.partitionCount; i++) {
-            initial.add(new BatchWorker<>(type, flushCallback, failureHandler, config));
+            initial.add(new BatchWorker<>(type, flushCallback, failureHandler, config, stats));
         }
         this.partitions = Collections.unmodifiableList(initial);
     }
@@ -196,7 +201,9 @@ public class BatchWorkerGroup<T> {
         try {
             // 信封构造即打提交时间戳
             boolean ok = spool.append(new EnvelopePOJO<>(routingKey, data));
-            if (!ok) {
+            if (ok) {
+                stats.recordSubmit();
+            } else {
                 log.warn("[{}] spool append rejected, stagingSize={}", key, spool.stagingSize());
                 NotifyManager.getInstance().tryNoticeOfferFailedAsync(key,
                         "spool 拒绝（磁盘预算满或暂存队列满超时）",
@@ -310,7 +317,13 @@ public class BatchWorkerGroup<T> {
         return new GroupSnapshotVO(key, running, config.getQueueCapacity(), config.getBatchSize(),
                 config.getMaxWaitMs(), config.getRateLimitPerSecond(), partitions.size(),
                 phase == null ? null : phase.name(),
-                getPartitionQueueSizes(), getStagingSize(), getSpoolUsage());
+                getPartitionQueueSizes(), getStagingSize(), getSpoolUsage(), statsVo());
+    }
+
+    /** 累计统计只读快照 */
+    private CumulativeStatsVO statsVo() {
+        return new CumulativeStatsVO(stats.submitTotal(), stats.callbackTotal(),
+                stats.rtBucketBoundaries(), stats.rtBucketCounts());
     }
 
     /** 各分区内存队列当前水位，下标即分区号 */
@@ -371,7 +384,7 @@ public class BatchWorkerGroup<T> {
         // 静止点之后变更不可失败：全新分区组启动后单步替换，旧组关闭不参与失败路径
         List<BatchWorker<T>> replacement = new ArrayList<>(newSize);
         for (int i = 0; i < newSize; i++) {
-            BatchWorker<T> worker = new BatchWorker<>(type, flushCallback, failureHandler, config);
+            BatchWorker<T> worker = new BatchWorker<>(type, flushCallback, failureHandler, config, stats);
             worker.setName(key + "-" + i);
             worker.start();
             replacement.add(worker);
