@@ -1,4 +1,4 @@
-package com.dynamicbatch.common.pojo;
+package com.dynamicbatch.core.pojo;
 
 
 /**

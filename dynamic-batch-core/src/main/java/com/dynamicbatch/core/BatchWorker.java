@@ -1,7 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
-import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
+import com.dynamicbatch.core.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
 import com.dynamicbatch.core.stats.CumulativeStats;
@@ -187,7 +187,7 @@ public class BatchWorker<T> {
         try {
             flushBatch(payloadBuffer);
         } finally {
-            // 一批取一次钟，逐条 rt = finishAt − 提交戳
+            // 一批取一次钟，逐条 rt = finishAt − 提交戳；成败同径记录
             long finishAt = System.currentTimeMillis();
             for (EnvelopePOJO<T> envelope : batch) {
                 long submitAt = envelope.getSubmitTimeMillis();
@@ -195,12 +195,8 @@ public class BatchWorker<T> {
                     continue;   // 未知哨兵不计 RT
                 }
                 // clamp 0 防 NTP 回拨；rt=0（同毫秒完成）是正常值
-                long rt = Math.max(0, finishAt - submitAt);
                 if (stats != null) {
-                    stats.recordCallback(rt);
-                }
-                if (log.isDebugEnabled()) {
-                    log.debug("[{}] entry rt={}ms, key={}", name, rt, envelope.getRoutingKey());
+                    stats.recordCallback(Math.max(0, finishAt - submitAt));
                 }
             }
         }

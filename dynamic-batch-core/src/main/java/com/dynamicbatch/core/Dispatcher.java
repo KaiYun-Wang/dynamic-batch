@@ -1,7 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
-import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
+import com.dynamicbatch.core.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

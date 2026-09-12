@@ -2,8 +2,9 @@ package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
+import com.dynamicbatch.core.pojo.StatsConfigPOJO;
 import com.dynamicbatch.core.stats.CumulativeStats;
-import com.dynamicbatch.core.vo.CumulativeStatsVO;
+import com.dynamicbatch.core.stats.StatsSnapshot;
 import org.junit.After;
 import org.junit.Rule;
 import org.junit.Test;
@@ -17,11 +18,12 @@ import java.util.function.BooleanSupplier;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * 组级累计统计端到端：submit → Spool → Dispatcher → Worker flush（含 shutdown 排空）
- * 全径计数对账，以及组快照中的累计值可见性。
+ * 组级统计端到端：submit → Spool → Dispatcher → Worker flush（含 shutdown 排空）
+ * 全径计数对账，以及组快照中 live 统计（现场差分）的可见性与空态约定。
  */
 public class GroupStatsIntegrationTest {
 
@@ -57,10 +59,10 @@ public class GroupStatsIntegrationTest {
         return true;
     }
 
-    /** 桶计数总和 */
-    private static long bucketSum(CumulativeStatsVO stats) {
+    /** 桶计数总和（累计口径：桶累计与回调累计同源，关闭后无并发写严格相等） */
+    private static long bucketSum(StatsSnapshot stats) {
         long sum = 0;
-        for (long count : stats.getRtBucketCounts()) {
+        for (long count : stats.getBucketTotals()) {
             sum += count;
         }
         return sum;
@@ -100,7 +102,7 @@ public class GroupStatsIntegrationTest {
         processor.shutdown();
         processor = null;
 
-        CumulativeStatsVO stats = group.snapshot().getStats();
+        StatsSnapshot stats = group.snapshot().getStats();
         assertNotNull(stats);
         assertEquals("提交计数应与 append 成功数一致", accepted, stats.getSubmitTotal());
         assertEquals("回调计数应与 flush 总数一致（一条不丢）", accepted, stats.getCallbackTotal());
@@ -135,7 +137,7 @@ public class GroupStatsIntegrationTest {
         assertTrue("失败回调也应计入回调计数（成败同径）",
                 awaitTrue(() -> group.snapshot().getStats().getCallbackTotal() == 3, 10_000));
 
-        CumulativeStatsVO stats = group.snapshot().getStats();
+        StatsSnapshot stats = group.snapshot().getStats();
         assertEquals(3L, stats.getSubmitTotal());
         assertEquals(3L, stats.getCallbackTotal());
         assertEquals("失败批次也应落 RT 桶", stats.getCallbackTotal(), bucketSum(stats));
@@ -168,18 +170,18 @@ public class GroupStatsIntegrationTest {
         processor.shutdown();
         processor = null;
 
-        CumulativeStatsVO stats = group.snapshot().getStats();
+        StatsSnapshot stats = group.snapshot().getStats();
         assertEquals("提交计数应与 append 成功数一致", accepted, stats.getSubmitTotal());
         assertTrue("回调计数不应超过提交计数", stats.getCallbackTotal() <= stats.getSubmitTotal());
         assertEquals("桶总和应与回调计数对账（成败同径）", stats.getCallbackTotal(), bucketSum(stats));
     }
 
     /**
-     * 组快照暴露累计统计：未启动组为全 0（计数器构造期常驻，桶数 = 默认边界数 + 1），
-     * 启动并消费后计数增长——endpoint 数据源可直接读数。
+     * 组快照统计可见性：未启动组 stats 为 null（采集未建，与 dispatcherPhase 的 null 约定一致），
+     * 启动消费后 live 差分立即可见（不必等采集 tick），关闭后累计读数仍可查。
      */
     @Test
-    public void snapshotExposesCumulativeStats() throws Exception {
+    public void snapshotExposesLiveStats() throws Exception {
         processor = new BatchProcessor();
         List<Integer> flushed = new CopyOnWriteArrayList<>();
         BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
@@ -189,21 +191,53 @@ public class GroupStatsIntegrationTest {
                 .maxWaitMs(50)
                 .build();
 
-        // 未注册：计数器已存在且为全 0
-        CumulativeStatsVO before = group.snapshot().getStats();
-        assertNotNull(before);
-        assertEquals(0L, before.getSubmitTotal());
-        assertEquals("桶数应 = 默认边界数 + 1",
-                CumulativeStats.defaultBoundaries().length + 1, before.getRtBucketCounts().length);
+        // 未启动：采集任务未建，stats 为 null
+        assertNull("未启动组 stats 应为 null", group.snapshot().getStats());
 
         processor.registerGroup("stats-snap", group);
         assertTrue(processor.submit("stats-snap", "k", 1));
         awaitFlushed(1, flushed, 10_000);
+        // 运行中：live 现场差分立即可见，不等采集 tick
+        assertTrue("消费完成后 live 统计立即可见",
+                awaitTrue(() -> group.snapshot().getStats() != null
+                        && group.snapshot().getStats().getCallbackTotal() == 1, 10_000));
+        StatsSnapshot live = group.snapshot().getStats();
+        assertEquals("live 差分的桶数应 = 默认边界数 + 1",
+                CumulativeStats.defaultBoundaries().length + 1, live.getBucketCounts().length);
+        assertTrue("区间应有效（start <= end）",
+                live.getIntervalStartMillis() <= live.getIntervalEndMillis());
+
         processor.shutdown();
         processor = null;
 
-        CumulativeStatsVO after = group.snapshot().getStats();
+        // 关闭后：采集已 cancel，累计读数仍可查
+        StatsSnapshot after = group.snapshot().getStats();
+        assertNotNull(after);
         assertEquals(1L, after.getSubmitTotal());
         assertEquals(1L, after.getCallbackTotal());
+    }
+
+    /**
+     * enabled=false：采集不建、endpoint stats 为 null；热路径裸数据照常累计不受管辖。
+     */
+    @Test
+    public void disabledCollectKeepsHotPathCounting() throws Exception {
+        processor = new BatchProcessor();
+        List<Integer> flushed = new CopyOnWriteArrayList<>();
+        BatchWorkerGroup<Integer> group = BatchWorkerGroup.builder(Integer.class,
+                        spoolConfig(new File(temp.getRoot(), "stats-off")),
+                        flushed::addAll)
+                .batchSize(10)
+                .maxWaitMs(50)
+                .statsConfig(StatsConfigPOJO.builder().enabled(false).build())
+                .build();
+        processor.registerGroup("stats-off", group);
+
+        assertTrue(processor.submit("stats-off", "k", 1));
+        awaitFlushed(1, flushed, 10_000);
+        processor.shutdown();
+        processor = null;
+
+        assertNull("采集关闭时 endpoint stats 应为 null", group.snapshot().getStats());
     }
 }

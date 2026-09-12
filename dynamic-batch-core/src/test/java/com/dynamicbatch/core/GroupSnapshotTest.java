@@ -84,6 +84,7 @@ public class GroupSnapshotTest {
         assertNull(snapshot.getDispatcherPhase());
         assertNull(snapshot.getStagingSize());
         assertNull(snapshot.getSpoolUsage());
+        assertNull("未启动组采集未建，stats 应为 null", snapshot.getStats());
     }
 
     /** 组不存在返回 null */

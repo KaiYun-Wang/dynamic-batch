@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -94,6 +95,8 @@ public class BatchEndpointTest {
         assertEquals(KEY, snapshot.getGroupKey());
         assertTrue(snapshot.isRunning());
         assertEquals("RUNNING", snapshot.getDispatcherPhase());
+        // 默认 statsConfig（采集开）：运行组 live 统计随快照带出
+        assertNotNull("运行组 stats 应随快照带出", snapshot.getStats());
     }
 
     /** 单组查询未知 key 返回 404 */

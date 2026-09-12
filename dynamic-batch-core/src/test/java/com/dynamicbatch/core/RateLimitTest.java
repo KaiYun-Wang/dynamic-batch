@@ -1,6 +1,6 @@
 package com.dynamicbatch.core;
 
-import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
+import com.dynamicbatch.core.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
 import org.junit.Rule;

@@ -1,6 +1,6 @@
 logging:
   level:
-    com.dynamicbatch: debug
+    com.dynamicbatch: info
 
 spring:
   application:
