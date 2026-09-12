@@ -1,11 +1,15 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
-import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
-import com.dynamicbatch.common.pojo.SpoolEntryPOJO;
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
+import com.dynamicbatch.core.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
-import com.dynamicbatch.core.serializer.SpoolEntrySerializer;
+import com.dynamicbatch.core.pojo.StatsConfigPOJO;
+import com.dynamicbatch.core.serializer.EnvelopeSerializer;
+import com.dynamicbatch.core.stats.CumulativeStats;
+import com.dynamicbatch.core.stats.StatsCollector;
+import com.dynamicbatch.core.stats.StatsSnapshot;
 import com.dynamicbatch.core.vo.GroupSnapshotVO;
 import com.dynamicbatch.spool.DiskUsage;
 import com.dynamicbatch.spool.JdkSerializer;
@@ -63,7 +67,7 @@ public class BatchWorkerGroup<T> {
     private volatile boolean shuttingDown;
 
     /** 磁盘缓冲（削峰蓄水池），start() 时按 spoolConfig 构建；未 start 的组为 null */
-    private Spool<SpoolEntryPOJO<T>> spool;
+    private Spool<EnvelopePOJO<T>> spool;
 
     /** 分发线程：从 Spool poll 并路由投递到 Worker 队列，start() 时构建接线；未 start 的组为 null */
     private Dispatcher<T> dispatcher;
@@ -71,16 +75,29 @@ public class BatchWorkerGroup<T> {
     /** Spool 配置（必传，编译期强制，spoolDir 必填；非泛型——载荷类型由本类 type 统一决定），start() 时据此构建 Spool */
     private final SpoolConfigPOJO spoolConfig;
 
+    /** 统计配置，不配 = 默认实例（采集开、5s、无 tp、默认 1-2-5 桶边界） */
+    private final StatsConfigPOJO statsConfig;
+
+    /** 组级累计统计，全部分区 Worker 共享同一实例；桶边界来自 statsConfig */
+    private final CumulativeStats stats;
+
+    /** 组级统计采集任务，enabled 才在 start() 创建；未启用为 null */
+    private volatile StatsCollector statsCollector;
+
     private BatchWorkerGroup(Builder<T> builder) {
         this.type = builder.type;
         this.flushCallback = builder.flushCallback;
         this.failureHandler = builder.failureHandler;
         this.config = builder.config;
         this.spoolConfig = builder.spoolConfig;
+        this.statsConfig = builder.statsConfig != null
+                ? builder.statsConfig : StatsConfigPOJO.builder().build();
+        this.stats = new CumulativeStats(statsConfig.getRtBuckets() != null
+                ? statsConfig.getRtBuckets() : CumulativeStats.defaultBoundaries());
         // 共享同一 config 实例：分区 Worker 不复制配置，组级公共字段经此对象读取
         List<BatchWorker<T>> initial = new ArrayList<>(builder.partitionCount);
         for (int i = 0; i < builder.partitionCount; i++) {
-            initial.add(new BatchWorker<>(type, flushCallback, failureHandler, config));
+            initial.add(new BatchWorker<>(type, flushCallback, failureHandler, config, stats));
         }
         this.partitions = Collections.unmodifiableList(initial);
     }
@@ -122,23 +139,29 @@ public class BatchWorkerGroup<T> {
         // ⑤ 启动分发线程：key 在 registerGroup 时才注入，线程名只能在此设置
         dispatcher.setName(key + "-dispatcher");
         dispatcher.start();
+        // ⑥ 启动统计采集（enabled 才建 Collector 自挂共享调度器）
+        if (statsConfig.isEnabled()) {
+            StatsCollector collector = new StatsCollector(key, stats, statsConfig);
+            collector.start();
+            this.statsCollector = collector;
+        }
         log.info("[{}] worker group started, partitions={}, queueCapacity={}, batchSize={}, spoolDir={}",
                 key, partitions.size(), config.getQueueCapacity(), config.getBatchSize(), spool.dir());
     }
 
     /**
-     * 按 spoolConfig 构建 {@code Spool<SpoolEntryPOJO<T>>}（信封序列化器外封 routingKey，
-     * 使用方序列化器只管载荷）。非空字段才调对应 Builder 链式方法，null 走 Spool 默认值，
-     * 两边默认值不重复维护；泛型擦除的 unchecked 强转收敛到本方法。
+     * 按 spoolConfig 构建 {@code Spool<EnvelopePOJO<T>>}（信封序列化器外封 routingKey 与
+     * 提交时间戳，使用方序列化器只管载荷）。非空字段才调对应 Builder 链式方法，null 走 Spool
+     * 默认值，两边默认值不重复维护；泛型擦除的 unchecked 强转收敛到本方法。
      * spoolConfig 非泛型：载荷类型由本类 type 统一提供，serializer 类型错配由双重 isInstance 兜底。
      */
     @SuppressWarnings("unchecked")
-    private Spool<SpoolEntryPOJO<T>> buildSpool() {
-        Class<SpoolEntryPOJO<T>> entryType = (Class<SpoolEntryPOJO<T>>) (Class<?>) SpoolEntryPOJO.class;
+    private Spool<EnvelopePOJO<T>> buildSpool() {
+        Class<EnvelopePOJO<T>> entryType = (Class<EnvelopePOJO<T>>) (Class<?>) EnvelopePOJO.class;
         Serializer<T> payload = (Serializer<T>) (spoolConfig.getSerializer() != null
                 ? spoolConfig.getSerializer() : new JdkSerializer<T>());
-        Serializer<SpoolEntryPOJO<T>> envelope = new SpoolEntrySerializer<>(type, payload);
-        Spool.Builder<SpoolEntryPOJO<T>> builder = Spool.builder(entryType, spoolConfig.getSpoolDir(), envelope);
+        Serializer<EnvelopePOJO<T>> envelope = new EnvelopeSerializer<>(type, payload);
+        Spool.Builder<EnvelopePOJO<T>> builder = Spool.builder(entryType, spoolConfig.getSpoolDir(), envelope);
         if (spoolConfig.getMaxSizeBytes() != null) {
             builder.maxSizeBytes(spoolConfig.getMaxSizeBytes());
         }
@@ -194,8 +217,11 @@ public class BatchWorkerGroup<T> {
             return false;
         }
         try {
-            boolean ok = spool.append(new SpoolEntryPOJO<>(routingKey, data));
-            if (!ok) {
+            // 信封构造即打提交时间戳
+            boolean ok = spool.append(new EnvelopePOJO<>(routingKey, data));
+            if (ok) {
+                stats.recordSubmit();
+            } else {
                 log.warn("[{}] spool append rejected, stagingSize={}", key, spool.stagingSize());
                 NotifyManager.getInstance().tryNoticeOfferFailedAsync(key,
                         "spool 拒绝（磁盘预算满或暂存队列满超时）",
@@ -211,10 +237,10 @@ public class BatchWorkerGroup<T> {
         }
     }
 
-    /** 分发线程投递入口：按 routingKey 路由到固定分区并阻塞投递（Dispatcher 接线 {@code this::submitWorker}） */
-    boolean submitWorker(String routingKey, T data) {
+    /** 分发线程投递入口：按信封 routingKey 路由到固定分区，整封阻塞投递（Dispatcher 接线 {@code this::submitWorker}） */
+    boolean submitWorker(EnvelopePOJO<T> envelope) {
         List<BatchWorker<T>> snapshot = partitions;   // 局部快照：size 与 get 必然同代，替换中间态不可见
-        return snapshot.get(Math.floorMod(routingKey.hashCode(), snapshot.size())).submit(data);
+        return snapshot.get(Math.floorMod(envelope.getRoutingKey().hashCode(), snapshot.size())).submit(envelope);
     }
 
     /**
@@ -241,6 +267,10 @@ public class BatchWorkerGroup<T> {
             worker.shutdown();
         }
         spool.close();
+        // 采集最后停，采到排空尾巴
+        if (statsCollector != null) {
+            statsCollector.stop();
+        }
         log.info("[{}] worker group stopped", key);
     }
 
@@ -309,7 +339,13 @@ public class BatchWorkerGroup<T> {
         return new GroupSnapshotVO(key, running, config.getQueueCapacity(), config.getBatchSize(),
                 config.getMaxWaitMs(), config.getRateLimitPerSecond(), partitions.size(),
                 phase == null ? null : phase.name(),
-                getPartitionQueueSizes(), getStagingSize(), getSpoolUsage());
+                getPartitionQueueSizes(), getStagingSize(), getSpoolUsage(), statsVo());
+    }
+
+    /** 统计 live 快照（现场差分，只读不推进）；未启用采集 / 组未启动为 null */
+    private StatsSnapshot statsVo() {
+        StatsCollector collector = this.statsCollector;
+        return collector == null ? null : collector.liveSnapshot();
     }
 
     /** 各分区内存队列当前水位，下标即分区号 */
@@ -370,7 +406,7 @@ public class BatchWorkerGroup<T> {
         // 静止点之后变更不可失败：全新分区组启动后单步替换，旧组关闭不参与失败路径
         List<BatchWorker<T>> replacement = new ArrayList<>(newSize);
         for (int i = 0; i < newSize; i++) {
-            BatchWorker<T> worker = new BatchWorker<>(type, flushCallback, failureHandler, config);
+            BatchWorker<T> worker = new BatchWorker<>(type, flushCallback, failureHandler, config, stats);
             worker.setName(key + "-" + i);
             worker.start();
             replacement.add(worker);
@@ -511,6 +547,8 @@ public class BatchWorkerGroup<T> {
         private Consumer<List<T>> failureHandler;
         /** Spool 配置（必传，编译期强制，spoolDir 必填），start() 时由框架内部构建 Spool */
         private final SpoolConfigPOJO spoolConfig;
+        /** 统计配置，null = 默认实例 */
+        private StatsConfigPOJO statsConfig;
 
         private Builder(Class<T> type, SpoolConfigPOJO spoolConfig, Consumer<List<T>> flushCallback) {
             this.type = Objects.requireNonNull(type, "type must not be null");
@@ -554,6 +592,15 @@ public class BatchWorkerGroup<T> {
 
         public Builder<T> failureHandler(Consumer<List<T>> failureHandler) {
             this.failureHandler = failureHandler;
+            return this;
+        }
+
+        /**
+         * 统计配置（enabled / collectIntervalMillis / percentiles / rtBuckets），
+         * 不配 = 默认实例。
+         */
+        public Builder<T> statsConfig(StatsConfigPOJO statsConfig) {
+            this.statsConfig = statsConfig;
             return this;
         }
 

@@ -1,8 +1,10 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
-import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
+import com.dynamicbatch.core.pojo.BatchWorkerGroupConfigPOJO;
+import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
+import com.dynamicbatch.core.stats.CumulativeStats;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,11 +32,14 @@ public class BatchWorker<T> {
     private static final Logger log = LoggerFactory.getLogger(BatchWorker.class);
 
     private String name;
-    /** 数据类型，submit 时做运行时校验（fail fast），避免错误类型混入队列 */
+    /** 数据类型，submit 时对信封载荷做运行时校验（fail fast），避免错误类型混入队列 */
     private final Class<T> type;
-    private final LinkedBlockingQueue<T> queue;
+    /** 信封队列：攒批与 flush 全程整封 */
+    private final LinkedBlockingQueue<EnvelopePOJO<T>> queue;
     /** 组共享配置（与 BatchWorkerGroup 同一实例），构建期锁定 */
     private final BatchWorkerGroupConfigPOJO config;
+    /** 组级累计统计（组共享同一实例，独立构建为 null 不统计） */
+    private final CumulativeStats stats;
     private final Consumer<List<T>> flushCallback;
     private final Consumer<List<T>> failureHandler;
 
@@ -49,13 +54,14 @@ public class BatchWorker<T> {
      * {@link Builder#build()} 也走本构造器。校验失败抛 {@link IllegalArgumentException}。
      */
     BatchWorker(Class<T> type, Consumer<List<T>> flushCallback, Consumer<List<T>> failureHandler,
-                 BatchWorkerGroupConfigPOJO config) {
+                 BatchWorkerGroupConfigPOJO config, CumulativeStats stats) {
         validateConfig(config);
         this.type = Objects.requireNonNull(type, "type must not be null");
         this.queue = new LinkedBlockingQueue<>(config.getQueueCapacity());
         this.flushCallback = Objects.requireNonNull(flushCallback, "flushCallback must not be null");
         this.failureHandler = failureHandler;
         this.config = config;
+        this.stats = stats;
     }
 
     public void setName(String name) {
@@ -83,15 +89,15 @@ public class BatchWorker<T> {
     }
 
     /**
-     * 投递一条数据到内存队列：队列满时阻塞等待空位，有位即投。
-     * 生产链路由 Dispatcher 调用，业务方一般不直接使用。
+     * 投递一条信封到内存队列：队列满时阻塞等待空位，有位即投。
+     * 生产链路由 Dispatcher 整封投递，业务方一般不直接使用。
      *
-     * <p>返回 true = 本条已终结（入队成功，或类型不匹配毒丸已丢弃），投递方可继续下一条；
+     * <p>返回 true = 本条已终结（入队成功，或载荷类型不匹配毒丸已丢弃），投递方可继续下一条；
      * false = 本条未投递（worker 已关闭，或强制关闭中断打断阻塞 put，在途条目丢弃）。
      *
      * @return true 本条已终结；false 未投递，投递方应结束
      */
-    public boolean submit(T data) {
+    public boolean submit(EnvelopePOJO<T> envelope) {
         // 已关闭则直接拒绝：避免「返回 true 但数据入队后无人消费」的静默丢失
         if (!running) {
             log.warn("[{}] submit rejected, worker not running", name);
@@ -99,14 +105,15 @@ public class BatchWorker<T> {
             return false;
         }
         // 毒丸丢弃：错误类型重试无意义，error 留痕后丢弃、继续下一条；
-        // 不发运维告警（内部防线，业务入口已校验过类型）
-        if (!type.isInstance(data)) {
+        // 校验对象是信封载荷（isInstance 对子类天然多态）；不发运维告警（内部防线，业务入口已校验过类型）
+        T payload = envelope.getPayload();
+        if (!type.isInstance(payload)) {
             log.error("[{}] poison entry dropped, type mismatch: expected={}, got={}",
-                    name, type.getName(), data == null ? "null" : data.getClass().getName());
+                    name, type.getName(), payload == null ? "null" : payload.getClass().getName());
             return true;
         }
         try {
-            queue.put(data);
+            queue.put(envelope);
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -116,12 +123,14 @@ public class BatchWorker<T> {
     }
 
     private void consumeLoop() {
-        List<T> batch = new ArrayList<>(config.getBatchSize());
+        // batch 装信封，batchPayload 由 flushAndRecord 在 flush 前填充
+        List<EnvelopePOJO<T>> batch = new ArrayList<>(config.getBatchSize());
+        List<T> batchPayload = new ArrayList<>(config.getBatchSize());
         while (running) {
             try {
                 // 用限时 poll 代替阻塞 take：running=false 后最迟 WAKEUP_INTERVAL_MS 感知到停止信号，
                 // 不会被攒批窗口（maxWaitMs 可能很大）卡住，关闭响应与攒批时长彻底解耦
-                T first = queue.poll(BatchWorkerConstant.WAKEUP_INTERVAL_MS, TimeUnit.MILLISECONDS);
+                EnvelopePOJO<T> first = queue.poll(BatchWorkerConstant.WAKEUP_INTERVAL_MS, TimeUnit.MILLISECONDS);
                 if (first == null) {
                     idle = true;   // poll 超时 = 无数据且无在途批次：批次边界上的静止点
                     continue;
@@ -137,7 +146,7 @@ public class BatchWorker<T> {
                     if (elapsed >= config.getMaxWaitMs()) {
                         break;
                     }
-                    T next = queue.poll(Math.min(BatchWorkerConstant.WAKEUP_INTERVAL_MS,
+                    EnvelopePOJO<T> next = queue.poll(Math.min(BatchWorkerConstant.WAKEUP_INTERVAL_MS,
                             config.getMaxWaitMs() - elapsed), TimeUnit.MILLISECONDS);
                     if (next == null) {
                         continue;
@@ -145,7 +154,7 @@ public class BatchWorker<T> {
                     batch.add(next);
                 }
 
-                flushBatch(batch);
+                flushAndRecord(batch, batchPayload);
                 batch.clear();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -159,7 +168,37 @@ public class BatchWorker<T> {
         // 退出前兜底刷掉批次中残留数据（主要是中断打断攒批的场景）
         if (!batch.isEmpty()) {
             log.info("[{}] flushing {} remaining records before exit", name, batch.size());
-            flushBatch(batch);
+            flushAndRecord(batch, batchPayload);
+        }
+    }
+
+    /**
+     * 拆载荷后 flush，finally 冻结结束时刻逐条记录 RT：flushBatch 内部已吞 Exception，
+     * 成功失败都执行 finally，同口径记录；攒批中未进入本方法的条目不记（未发生回调，无 RT）。
+     */
+    private void flushAndRecord(List<EnvelopePOJO<T>> batch, List<T> payloadBuffer) {
+        if (batch.isEmpty()) {
+            return;
+        }
+        payloadBuffer.clear();
+        for (EnvelopePOJO<T> envelope : batch) {
+            payloadBuffer.add(envelope.getPayload());
+        }
+        try {
+            flushBatch(payloadBuffer);
+        } finally {
+            // 一批取一次钟，逐条 rt = finishAt − 提交戳；成败同径记录
+            long finishAt = System.currentTimeMillis();
+            for (EnvelopePOJO<T> envelope : batch) {
+                long submitAt = envelope.getSubmitTimeMillis();
+                if (submitAt == 0) {
+                    continue;   // 未知哨兵不计 RT
+                }
+                // clamp 0 防 NTP 回拨；rt=0（同毫秒完成）是正常值
+                if (stats != null) {
+                    stats.recordCallback(Math.max(0, finishAt - submitAt));
+                }
+            }
         }
     }
 
@@ -239,16 +278,17 @@ public class BatchWorker<T> {
     }
 
     /**
-     * 排空队列中剩余数据，并按批次大小分批刷盘
+     * 排空队列中剩余信封，并按批次大小分批刷盘记录
      */
     private void flushRemaining() {
-        List<T> remaining = new ArrayList<>();
+        List<EnvelopePOJO<T>> remaining = new ArrayList<>();
         queue.drainTo(remaining);
         if (!remaining.isEmpty()) {
             log.info("[{}] flushing {} remaining items on shutdown", name, remaining.size());
+            List<T> payloadBuffer = new ArrayList<>(Math.min(config.getBatchSize(), remaining.size()));
             for (int i = 0; i < remaining.size(); i += config.getBatchSize()) {
                 int end = Math.min(i + config.getBatchSize(), remaining.size());
-                flushBatch(remaining.subList(i, end));
+                flushAndRecord(remaining.subList(i, end), payloadBuffer);
             }
         }
     }
@@ -337,7 +377,7 @@ public class BatchWorker<T> {
          * 构建 {@code BatchWorker} 实例，执行参数校验。
          */
         public BatchWorker<T> build() {
-            return new BatchWorker<>(type, flushCallback, failureHandler, config);
+            return new BatchWorker<>(type, flushCallback, failureHandler, config, null);
         }
     }
 }

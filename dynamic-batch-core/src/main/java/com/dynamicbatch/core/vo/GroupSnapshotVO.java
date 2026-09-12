@@ -1,14 +1,16 @@
 package com.dynamicbatch.core.vo;
 
+import com.dynamicbatch.core.stats.StatsSnapshot;
 import com.dynamicbatch.spool.DiskUsage;
 
 import java.util.List;
 
 /**
- * Worker 组运行快照：配置、分区、调度器相位、队列水位与磁盘占用的瞬时只读值。
+ * Worker 组运行快照：配置、分区、调度器相位、队列水位、磁盘占用与统计的瞬时只读值。
  *
- * <p>各字段为独立时点读取，持续变化的字段（水位 / 占用 / 相位）之间无原子性保证。
- * 未启动组的 {@code dispatcherPhase} / {@code stagingSize} / {@code spoolUsage} 为 null。
+ * <p>各字段为独立时点读取，持续变化的字段（水位 / 占用 / 相位 / 统计）之间无原子性保证。
+ * 未启动组或未启用采集（{@code statsConfig.enabled=false}）时 {@code dispatcherPhase} /
+ * {@code stagingSize} / {@code spoolUsage} / {@code stats} 为 null。
  */
 public final class GroupSnapshotVO {
 
@@ -34,11 +36,14 @@ public final class GroupSnapshotVO {
     private final Integer stagingSize;
     /** Spool 磁盘占用拆分；未启动为 null */
     private final DiskUsage spoolUsage;
+    /** 统计快照（增量 + 累计与派生 qps/tp 的 live 差分值）；未启用采集或组未启动为 null */
+    private final StatsSnapshot stats;
 
     public GroupSnapshotVO(String groupKey, boolean running, Integer queueCapacity, Integer batchSize,
                            Long maxWaitMs, Integer rateLimitPerSecond, int partitionCount,
                            String dispatcherPhase,
-                           List<Integer> queueSizes, Integer stagingSize, DiskUsage spoolUsage) {
+                           List<Integer> queueSizes, Integer stagingSize, DiskUsage spoolUsage,
+                           StatsSnapshot stats) {
         this.groupKey = groupKey;
         this.running = running;
         this.queueCapacity = queueCapacity;
@@ -50,6 +55,7 @@ public final class GroupSnapshotVO {
         this.queueSizes = queueSizes;
         this.stagingSize = stagingSize;
         this.spoolUsage = spoolUsage;
+        this.stats = stats;
     }
 
     public String getGroupKey() {
@@ -96,6 +102,10 @@ public final class GroupSnapshotVO {
         return spoolUsage;
     }
 
+    public StatsSnapshot getStats() {
+        return stats;
+    }
+
     @Override
     public String toString() {
         return "GroupSnapshotVO{groupKey=" + groupKey + ", running=" + running
@@ -103,6 +113,7 @@ public final class GroupSnapshotVO {
                 + ", maxWaitMs=" + maxWaitMs + ", rateLimitPerSecond=" + rateLimitPerSecond
                 + ", partitionCount=" + partitionCount
                 + ", dispatcherPhase=" + dispatcherPhase + ", queueSizes=" + queueSizes
-                + ", stagingSize=" + stagingSize + ", spoolUsage=" + spoolUsage + "}";
+                + ", stagingSize=" + stagingSize + ", spoolUsage=" + spoolUsage
+                + ", stats=" + stats + "}";
     }
 }
