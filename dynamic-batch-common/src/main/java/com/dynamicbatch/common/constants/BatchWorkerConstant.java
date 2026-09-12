@@ -19,4 +19,6 @@ public class BatchWorkerConstant {
     public static final int DEFAULT_PARTITION_COUNT = 1;
     /** 暂停/恢复后每隔多久检查一次相位是否已从「待状态」切换到「已状态」（毫秒） */
     public static final long PAUSE_POLL_INTERVAL_MS = 50L;
+    /** 统计采集周期默认值（毫秒），即差分间隔与 endpoint live 值的最大陈旧度 */
+    public static final long DEFAULT_STATS_COLLECT_INTERVAL_MS = 5000L;
 }

@@ -1,13 +1,15 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.constants.BatchWorkerConstant;
-import com.dynamicbatch.common.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.common.pojo.EnvelopePOJO;
 import com.dynamicbatch.core.notifier.manager.NotifyManager;
+import com.dynamicbatch.core.pojo.BatchWorkerGroupConfigPOJO;
 import com.dynamicbatch.core.pojo.SpoolConfigPOJO;
+import com.dynamicbatch.core.pojo.StatsConfigPOJO;
 import com.dynamicbatch.core.serializer.EnvelopeSerializer;
 import com.dynamicbatch.core.stats.CumulativeStats;
-import com.dynamicbatch.core.vo.CumulativeStatsVO;
+import com.dynamicbatch.core.stats.StatsCollector;
+import com.dynamicbatch.core.stats.StatsSnapshot;
 import com.dynamicbatch.core.vo.GroupSnapshotVO;
 import com.dynamicbatch.spool.DiskUsage;
 import com.dynamicbatch.spool.JdkSerializer;
@@ -73,8 +75,14 @@ public class BatchWorkerGroup<T> {
     /** Spool 配置（必传，编译期强制，spoolDir 必填；非泛型——载荷类型由本类 type 统一决定），start() 时据此构建 Spool */
     private final SpoolConfigPOJO spoolConfig;
 
-    /** 组级累计统计（默认桶边界），全部分区 Worker 共享同一实例 */
-    private final CumulativeStats stats = new CumulativeStats(CumulativeStats.defaultBoundaries());
+    /** 统计配置，不配 = 默认实例（采集开、5s、无 tp、默认 1-2-5 桶边界） */
+    private final StatsConfigPOJO statsConfig;
+
+    /** 组级累计统计，全部分区 Worker 共享同一实例；桶边界来自 statsConfig */
+    private final CumulativeStats stats;
+
+    /** 组级统计采集任务，enabled 才在 start() 创建；未启用为 null */
+    private volatile StatsCollector statsCollector;
 
     private BatchWorkerGroup(Builder<T> builder) {
         this.type = builder.type;
@@ -82,6 +90,10 @@ public class BatchWorkerGroup<T> {
         this.failureHandler = builder.failureHandler;
         this.config = builder.config;
         this.spoolConfig = builder.spoolConfig;
+        this.statsConfig = builder.statsConfig != null
+                ? builder.statsConfig : StatsConfigPOJO.builder().build();
+        this.stats = new CumulativeStats(statsConfig.getRtBuckets() != null
+                ? statsConfig.getRtBuckets() : CumulativeStats.defaultBoundaries());
         // 共享同一 config 实例：分区 Worker 不复制配置，组级公共字段经此对象读取
         List<BatchWorker<T>> initial = new ArrayList<>(builder.partitionCount);
         for (int i = 0; i < builder.partitionCount; i++) {
@@ -127,6 +139,12 @@ public class BatchWorkerGroup<T> {
         // ⑤ 启动分发线程：key 在 registerGroup 时才注入，线程名只能在此设置
         dispatcher.setName(key + "-dispatcher");
         dispatcher.start();
+        // ⑥ 启动统计采集（enabled 才建 Collector 自挂共享调度器）
+        if (statsConfig.isEnabled()) {
+            StatsCollector collector = new StatsCollector(key, stats, statsConfig);
+            collector.start();
+            this.statsCollector = collector;
+        }
         log.info("[{}] worker group started, partitions={}, queueCapacity={}, batchSize={}, spoolDir={}",
                 key, partitions.size(), config.getQueueCapacity(), config.getBatchSize(), spool.dir());
     }
@@ -249,6 +267,10 @@ public class BatchWorkerGroup<T> {
             worker.shutdown();
         }
         spool.close();
+        // 采集最后停，采到排空尾巴
+        if (statsCollector != null) {
+            statsCollector.stop();
+        }
         log.info("[{}] worker group stopped", key);
     }
 
@@ -320,10 +342,10 @@ public class BatchWorkerGroup<T> {
                 getPartitionQueueSizes(), getStagingSize(), getSpoolUsage(), statsVo());
     }
 
-    /** 累计统计只读快照 */
-    private CumulativeStatsVO statsVo() {
-        return new CumulativeStatsVO(stats.submitTotal(), stats.callbackTotal(),
-                stats.rtBucketBoundaries(), stats.rtBucketCounts());
+    /** 统计 live 快照（现场差分，只读不推进）；未启用采集 / 组未启动为 null */
+    private StatsSnapshot statsVo() {
+        StatsCollector collector = this.statsCollector;
+        return collector == null ? null : collector.liveSnapshot();
     }
 
     /** 各分区内存队列当前水位，下标即分区号 */
@@ -525,6 +547,8 @@ public class BatchWorkerGroup<T> {
         private Consumer<List<T>> failureHandler;
         /** Spool 配置（必传，编译期强制，spoolDir 必填），start() 时由框架内部构建 Spool */
         private final SpoolConfigPOJO spoolConfig;
+        /** 统计配置，null = 默认实例 */
+        private StatsConfigPOJO statsConfig;
 
         private Builder(Class<T> type, SpoolConfigPOJO spoolConfig, Consumer<List<T>> flushCallback) {
             this.type = Objects.requireNonNull(type, "type must not be null");
@@ -568,6 +592,15 @@ public class BatchWorkerGroup<T> {
 
         public Builder<T> failureHandler(Consumer<List<T>> failureHandler) {
             this.failureHandler = failureHandler;
+            return this;
+        }
+
+        /**
+         * 统计配置（enabled / collectIntervalMillis / percentiles / rtBuckets），
+         * 不配 = 默认实例。
+         */
+        public Builder<T> statsConfig(StatsConfigPOJO statsConfig) {
+            this.statsConfig = statsConfig;
             return this;
         }
 
