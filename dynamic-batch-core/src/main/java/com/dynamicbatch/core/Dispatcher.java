@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
@@ -169,33 +170,57 @@ class Dispatcher<T> {
         log.info("[{}] dispatcher started", name);
     }
 
-    /**
-     * 优雅关闭：置 {@code running=false} → join 消费线程 → 超时则 interrupt 再短等。
-     * 重复调用安全（thread 已清空时直接返回）。
-     */
-    synchronized void stop() {
+    /** 置停止信号：仅写 volatile 标志，µs 级返回，不等线程退出 */
+    void requestStop() {
         running = false;
+    }
+
+    /** 限时等待分发线程退出（默认预算，兼容单独使用） */
+    synchronized void stop() {
+        requestStop();
+        awaitStop(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(BatchWorkerConstant.SHUTDOWN_WAIT_MS));
+    }
+
+    /**
+     * 限时等待分发线程退出：预算内未退 → 强制中断再短等（计入预算）→ 仍存活则弃权。
+     *
+     * @return true 线程已退出；false 弃权（daemon 孤儿自行终结，卡在不可中断的阻塞投递）
+     */
+    synchronized boolean awaitStop(long deadlineNanos) {
         if (thread == null) {
-            return;
+            return true;
         }
         try {
-            thread.join(BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+            joinBounded(deadlineNanos);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.warn("[{}] dispatcher stop interrupted while waiting", name);
         }
         if (thread.isAlive()) {
-            log.warn("[{}] dispatcher still alive after {}ms, forcing interrupt",
-                    name, BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+            log.warn("[{}] dispatcher still alive, forcing interrupt", name);
             thread.interrupt();
             try {
-                thread.join(1000);
+                joinBounded(Math.min(deadlineNanos, System.nanoTime() + TimeUnit.SECONDS.toNanos(1)));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
+        boolean clean = !thread.isAlive();
         thread = null;
-        log.info("[{}] dispatcher stopped", name);
+        if (clean) {
+            log.info("[{}] dispatcher stopped", name);
+        } else {
+            log.error("[{}] dispatcher abandoned, shutdown budget exhausted", name);
+        }
+        return clean;
+    }
+
+    /** join 至截止时刻：预算耗尽立即返回（join(0) 语义是永等，必须防） */
+    private void joinBounded(long deadlineNanos) throws InterruptedException {
+        long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+        if (remainingMs > 0) {
+            thread.join(remainingMs);
+        }
     }
 
     /**

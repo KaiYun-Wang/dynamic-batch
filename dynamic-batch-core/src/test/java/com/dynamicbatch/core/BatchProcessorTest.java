@@ -101,6 +101,28 @@ public class BatchProcessorTest {
         assertEquals(2, flushed.size());
     }
 
+    /**
+     * 回归防御：空闲组关闭必须远快于预算——停止信号若漏发到分发线程，
+     * 它会干等满预算被弃权（曾实测拖满 5s）。
+     */
+    @Test
+    public void shutdownShouldNotBurnBudgetWhenIdle() throws Exception {
+        processor = new BatchProcessor();
+        processor.registerGroup("idle-shutdown",
+                BatchWorkerGroup.builder(String.class,
+                        spoolConfig(new File(temp.getRoot(), "idle-shutdown")),
+                        batch -> { })
+                        .build());
+
+        Thread.sleep(200);   // 让分发线程进入空转挂起
+        long start = System.currentTimeMillis();
+        processor.shutdown();
+        long elapsed = System.currentTimeMillis() - start;
+        assertTrue("shutdown took " + elapsed + "ms, dispatcher stop signal likely missed",
+                elapsed < 3000);
+        processor = null;
+    }
+
     @Test
     public void submitShouldRejectWrongType() throws Exception {
         processor = new BatchProcessor();

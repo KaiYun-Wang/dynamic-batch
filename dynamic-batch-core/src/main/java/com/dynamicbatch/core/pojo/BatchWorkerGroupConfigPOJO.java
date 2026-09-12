@@ -20,6 +20,8 @@ public class BatchWorkerGroupConfigPOJO {
     private volatile Long maxWaitMs;
     /** 组级投递限速（条/秒），null = 未配置即不限流（本字段不兑默认值）；volatile：分发线程每轮读，调参线程写 */
     private volatile Integer rateLimitPerSecond;
+    /** 关闭总预算（毫秒）：从发起关闭到全部分区收尾完成的硬上限，超时弃权、未刷的内存数据丢弃（磁盘已落盘数据不受影响） */
+    private volatile Long shutdownTimeoutMs;
 
     public Integer getQueueCapacity() {
         return queueCapacity;
@@ -51,5 +53,13 @@ public class BatchWorkerGroupConfigPOJO {
 
     public void setRateLimitPerSecond(Integer rateLimitPerSecond) {
         this.rateLimitPerSecond = rateLimitPerSecond;
+    }
+
+    public Long getShutdownTimeoutMs() {
+        return shutdownTimeoutMs;
+    }
+
+    public void setShutdownTimeoutMs(Long shutdownTimeoutMs) {
+        this.shutdownTimeoutMs = shutdownTimeoutMs;
     }
 }

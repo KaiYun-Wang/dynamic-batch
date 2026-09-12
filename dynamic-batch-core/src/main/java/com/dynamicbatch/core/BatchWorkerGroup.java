@@ -23,25 +23,23 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 /**
- * 批处理 Worker 组：磁盘缓冲 + 分发线程 + 分区 Worker 组的编排者。
+ * 批处理 Worker 组：磁盘缓冲 + 分发线程 + 分区 Worker 的编排者。
  *
- * <p>数据链路：{@code submit → Spool(磁盘) → Dispatcher → Worker 内存队列 → flushCallback}。
- * submit 仅将数据写入 Spool 削峰，由分发线程异步搬运并按 routingKey 路由；
- * 路由规则：{@code routingKey.hashCode() % 分区数} 取模——同一 routingKey 永远进入
- * 同一分区，分区内 FIFO + 单线程消费 = 严格有序。
+ * <p>数据链路 {@code submit → Spool(磁盘) → Dispatcher → Worker 队列 → flushCallback}；
+ * submit 只写 Spool 削峰，分发线程异步搬运。同一 routingKey 恒入同一分区（hashCode 取模），
+ * 分区内 FIFO + 单线程消费 = 严格有序。
  *
- * <p>生命周期（启动顺序 Spool → Workers → Dispatcher，关闭逆序逐个彻底关闭）：
- * Spool 与 Dispatcher 在 {@link #start()}（即 {@link BatchProcessor#registerGroup} 期）构建，
- * {@code build()} 仅做配置校验——未注册的组不持有任何磁盘资源；构建失败异常传播阻断启动
- * （fail fast），进程重启后同目录重建 Spool 从持久化读进度续读。
+ * <p>生命周期：启动 Spool → Workers → Dispatcher；关闭逆序——Dispatcher 先彻底停，
+ * Workers 广播并行收尾（限时、到点弃权），最后关 Spool。
  *
- * <p>组内全部分区共享同一份 {@link BatchWorkerGroupConfigPOJO} 实例：分区 Worker 不持有
- * 独立配置，全部读取该共享对象（构建期锁定）。组由 {@link BatchProcessor} 统一管理，
- * 业务方不直接操作分区 Worker 与分发线程。
+ * <p>Spool / Dispatcher 在 {@link #start()} 构建，{@code build()} 仅做配置校验，
+ * 未注册的组不持有磁盘资源；启动失败 fail fast，重启后同目录续读。
+ * 组由 {@link BatchProcessor} 统一管理，业务方不直接操作分区 Worker 与分发线程。
  */
 public class BatchWorkerGroup<T> {
     private static final Logger log = LoggerFactory.getLogger(BatchWorkerGroup.class);
@@ -245,34 +243,53 @@ public class BatchWorkerGroup<T> {
     }
 
     /**
-     * 优雅关闭：先停分发线程（已 poll 条目终结才退：阻塞投递成功，或强制关闭中断
-     * 丢弃在途条目），再关闭全部分区
-     * （每个分区：等消费线程自然退出 → 超时强制中断 → 排空剩余数据刷盘），最后关 Spool。
+     * 优雅关闭：分发线程先彻底停（在途阻塞投递中断终结，Worker 收尾时队列封闭），
+     * 再广播全部分区停止信号并行收尾（总时长 = max 而非 sum），限时等待、到点弃权，最后关 Spool。
+     * 预算 = shutdownTimeoutMs（组级配置）。
      *
-     * <p>关闭顺序与启动相反（Dispatcher → Workers → Spool），下一环等上一环彻底关闭：
-     * Dispatcher 停止后 Worker 仍接收投递（在途条目不丢，队列内数据由 flushRemaining 兜底）；
-     * Spool close 排空暂存落盘并释放目录锁。磁盘上未消费的数据不删除，下次同目录启动续读。
-     * 未启动的组无任何资源（spool/dispatcher 均为 null），直接返回。
+     * <p>弃权只丢内存未刷数据（error 汇总日志），磁盘已落盘数据下次启动续读。
      */
     public synchronized void shutdown() {
+        Long configured = config.getShutdownTimeoutMs();
+        shutdown(configured != null ? configured : BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+    }
+
+    /** 指定总预算（毫秒）的关闭：deadline 在分发线程与各分区间共享，先到先得 */
+    public synchronized void shutdown(long timeoutMs) {
         shuttingDown = true;
         if (!running) {
             return;
         }
         running = false;
-        // 关闭顺序与启动相反（Dispatcher → Workers → Spool）：先停分发线程（阻塞投递终结
-        // 才退：成功入队或强制关闭中断丢在途），再关分区（等自然退出 → 超时中断 → flushRemaining），
-        // 最后关 Spool（排空暂存落盘 + 释放目录锁）；漏掉任一环都会导致 Dispatcher 泄漏阻塞或锁不释放
-        dispatcher.stop();
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        int abandoned = 0;
+        // 分发线程先停：先发停止信号再限时等待；在途阻塞投递中断终结后，Worker 收尾时队列封闭，无迟到投递竞态
+        if (dispatcher != null) {
+            dispatcher.requestStop();
+            if (!dispatcher.awaitStop(deadlineNanos)) {
+                abandoned++;
+            }
+        }
+        // 广播分区停止信号（各 Worker 退出路径自行排空刷盘），再逐个限时等待，到点弃权
         for (BatchWorker<T> worker : partitions) {
-            worker.shutdown();
+            worker.requestStop(deadlineNanos);
+        }
+        for (BatchWorker<T> worker : partitions) {
+            if (!worker.awaitStop(deadlineNanos)) {
+                abandoned++;
+            }
         }
         spool.close();
         // 采集最后停，采到排空尾巴
         if (statsCollector != null) {
             statsCollector.stop();
         }
-        log.info("[{}] worker group stopped", key);
+        if (abandoned == 0) {
+            log.info("[{}] worker group stopped", key);
+        } else {
+            log.error("[{}] worker group stopped, {} consumer(s) abandoned, unflushed items dropped "
+                    + "(on-disk data untouched, resumed on next start)", key, abandoned);
+        }
     }
 
     // ======================== 调度器暂停/恢复 ========================
@@ -558,6 +575,7 @@ public class BatchWorkerGroup<T> {
             config.setQueueCapacity(BatchWorkerConstant.DEFAULT_QUEUE_CAPACITY);
             config.setBatchSize(BatchWorkerConstant.DEFAULT_BATCH_SIZE);
             config.setMaxWaitMs(BatchWorkerConstant.DEFAULT_MAX_WAIT_MS);
+            config.setShutdownTimeoutMs(BatchWorkerConstant.SHUTDOWN_WAIT_MS);
         }
 
         public Builder<T> partitionCount(int partitionCount) {
@@ -588,6 +606,16 @@ public class BatchWorkerGroup<T> {
          */
         public Builder<T> rateLimit(int rateLimitPerSecond) {
             config.setRateLimitPerSecond(rateLimitPerSecond);
+            return this;
+        }
+
+        /**
+         * 关闭总预算（毫秒）：从广播停止信号到弃权卡死分区的硬上限；
+         * 预算内未收尾完成的分区被弃权，未刷的内存数据丢弃（磁盘已落盘数据不受影响）。
+         * 不配 = 默认 {@code SHUTDOWN_WAIT_MS}。
+         */
+        public Builder<T> shutdownTimeoutMs(long shutdownTimeoutMs) {
+            config.setShutdownTimeoutMs(shutdownTimeoutMs);
             return this;
         }
 

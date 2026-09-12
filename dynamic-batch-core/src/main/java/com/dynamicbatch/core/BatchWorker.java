@@ -46,6 +46,9 @@ public class BatchWorker<T> {
     private volatile boolean running;
     private Thread consumerThread;
 
+    /** 收尾刷盘截止时刻（nanoTime）：shutdown 预算传入；0 = 不限时（resize 等无预算路径） */
+    private volatile long flushDeadlineNanos;
+
     /** 空闲标志：队列无数据且无在途批次时为 true（批次边界置位），分区组替换据此判定静止点 */
     private volatile boolean idle;
 
@@ -165,10 +168,15 @@ public class BatchWorker<T> {
             }
         }
 
-        // 退出前兜底刷掉批次中残留数据（主要是中断打断攒批的场景）
+        // 收尾（消费线程自己执行，不阻塞关闭流程）：先清中断标志，避免用户回调带着中断收尾全量失败
+        boolean interrupted = Thread.interrupted();
         if (!batch.isEmpty()) {
             log.info("[{}] flushing {} remaining records before exit", name, batch.size());
             flushAndRecord(batch, batchPayload);
+        }
+        flushRemaining();
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -232,13 +240,19 @@ public class BatchWorker<T> {
     }
 
     /**
-     * 优雅关闭（生命周期关闭）：置停止信号 → 等消费线程退出 → 排空队列剩余数据分批刷盘
+     * 优雅关闭：置停止信号 → 限时等消费线程收尾退出（排空刷盘在消费线程退出路径执行）→ 到点弃权。
      */
     public synchronized void shutdown() {
-        requestStop();
-        awaitStop();
-        flushRemaining();
-        log.info("[{}] worker stopped", name);
+        shutdown(BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+    }
+
+    /** 指定收尾预算的关闭：预算耗尽（如回调卡死在不可中断调用）时弃权，未刷数据丢弃并记日志 */
+    public synchronized void shutdown(long timeoutMs) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        requestStop(deadlineNanos);
+        if (awaitStop(deadlineNanos)) {
+            log.info("[{}] worker stopped", name);
+        }
     }
 
     /** 置停止信号，不等消费线程退出（与 {@link #awaitStop()} 配对） */
@@ -246,39 +260,63 @@ public class BatchWorker<T> {
         running = false;
     }
 
-    /**
-     * 等消费线程退出：自然退出超时则强制中断再短等。
-     * 不刷盘队列——刷盘是 {@link #shutdown()} 的收尾，分区组替换场景队列必空、无刷盘需求。
-     */
+    /** 置停止信号并约定收尾截止时刻：先写截止时刻再置标志（均 volatile），收尾线程见停止信号时必见截止时刻 */
+    void requestStop(long flushDeadlineNanos) {
+        this.flushDeadlineNanos = flushDeadlineNanos;
+        running = false;
+    }
+
+    /** 限时等待消费线程退出（默认预算） */
     void awaitStop() {
+        awaitStop(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(BatchWorkerConstant.SHUTDOWN_WAIT_MS));
+    }
+
+    /**
+     * 限时等待消费线程退出：预算内未退 → 强制中断再短等（计入预算）→ 仍存活则弃权。
+     * 排空刷盘在消费线程退出路径执行，本方法只等不刷。
+     *
+     * @return true 线程已退出；false 弃权（daemon 孤儿自行终结，滞留数据按预算丢弃）
+     */
+    boolean awaitStop(long deadlineNanos) {
         if (consumerThread == null) {
-            return;
+            return true;
         }
-        // 消费线程最迟 WAKEUP_INTERVAL_MS 内感知停止信号并自然退出，
-        // 这里只需等它把手头批次处理完（含 flushCallback 耗时），与攒批窗口 maxWaitMs 无关
         try {
-            consumerThread.join(BatchWorkerConstant.SHUTDOWN_WAIT_MS);
+            joinBounded(deadlineNanos);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.warn("[{}] await stop interrupted while waiting for consumer", name);
         }
+        if (!consumerThread.isAlive()) {
+            return true;
+        }
+        // 预算内未退出：卡在慢回调/攒批中，强制中断兜底
+        log.warn("[{}] consumer still alive, forcing interrupt; "
+                + "flushCallback may still be running, ensure it is thread-safe", name);
+        consumerThread.interrupt();
+        try {
+            joinBounded(Math.min(deadlineNanos, System.nanoTime() + TimeUnit.SECONDS.toNanos(1)));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (!consumerThread.isAlive()) {
+            return true;
+        }
+        log.error("[{}] consumer abandoned, shutdown budget exhausted, {} items unflushed", name, queue.size());
+        return false;
+    }
 
-        // 超时仍存活：说明卡在慢回调/异常中，强制中断兜底
-        if (consumerThread.isAlive()) {
-            log.warn("[{}] consumer still alive after {}ms, forcing interrupt; " +
-                    "flushCallback may still be running, ensure it is thread-safe", name, BatchWorkerConstant.SHUTDOWN_WAIT_MS);
-            consumerThread.interrupt();
-            // 中断后再短暂等待，确保消费线程真正退出，避免与调用方后续动作并发执行回调
-            try {
-                consumerThread.join(1000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+    /** join 至截止时刻：预算耗尽立即返回（join(0) 语义是永等，必须防） */
+    private void joinBounded(long deadlineNanos) throws InterruptedException {
+        long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+        if (remainingMs > 0) {
+            consumerThread.join(remainingMs);
         }
     }
 
     /**
-     * 排空队列中剩余信封，并按批次大小分批刷盘记录
+     * 排空队列剩余信封，按批次大小分批刷盘（消费线程退出路径执行）：
+     * 批间检查截止时刻，预算耗尽即止，剩余数据记日志丢弃。
      */
     private void flushRemaining() {
         List<EnvelopePOJO<T>> remaining = new ArrayList<>();
@@ -287,10 +325,19 @@ public class BatchWorker<T> {
             log.info("[{}] flushing {} remaining items on shutdown", name, remaining.size());
             List<T> payloadBuffer = new ArrayList<>(Math.min(config.getBatchSize(), remaining.size()));
             for (int i = 0; i < remaining.size(); i += config.getBatchSize()) {
+                if (flushDeadlinePassed()) {
+                    log.error("[{}] flush budget exhausted, {} items dropped on shutdown", name, remaining.size() - i);
+                    return;
+                }
                 int end = Math.min(i + config.getBatchSize(), remaining.size());
                 flushAndRecord(remaining.subList(i, end), payloadBuffer);
             }
         }
+    }
+
+    /** 收尾刷盘是否已过截止时刻：未设预算（flushDeadlineNanos=0）视为不限时 */
+    private boolean flushDeadlinePassed() {
+        return flushDeadlineNanos != 0L && System.nanoTime() >= flushDeadlineNanos;
     }
 
     // ======================== 参数校验 ========================
