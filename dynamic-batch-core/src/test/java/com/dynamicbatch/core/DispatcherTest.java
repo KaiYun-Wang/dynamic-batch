@@ -1,6 +1,7 @@
 package com.dynamicbatch.core;
 
 import com.dynamicbatch.common.pojo.EnvelopePOJO;
+import com.dynamicbatch.core.pojo.BatchWorkerGroupConfigPOJO;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -100,7 +101,16 @@ public class DispatcherTest {
                     pollCount.incrementAndGet();
                     return null;
                 },
-                envelope -> true);
+                envelope -> true,
+                new BatchWorkerGroupConfigPOJO(),
+                ms -> {   // 无信号：睡满 timeout（模拟真挂起），仅兜底周期强制真读
+                    try {
+                        Thread.sleep(ms);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return false;
+                });
 
         dispatcher.setName("test-empty-poll");
         dispatcher.start();
@@ -109,6 +119,41 @@ public class DispatcherTest {
 
         assertTrue("应持续轮询而非卡死", pollCount.get() >= 3);
         assertTrue("禁止忙等空转", pollCount.get() <= 8);
+    }
+
+    /**
+     * 空转挂起中信号到达：写端置“有新数据”（模拟落盘 release）→ 挂起立即唤醒真读取数。
+     */
+    @Test
+    public void signalWakePollsImmediately() throws Exception {
+        AtomicBoolean hasNewData = new AtomicBoolean();
+        AtomicInteger pollCount = new AtomicInteger();
+        CountDownLatch delivered = new CountDownLatch(1);
+        EnvelopePOJO<String> entry = new EnvelopePOJO<>("signal-key", "signal-value");
+
+        Dispatcher<String> dispatcher = new Dispatcher<>(
+                lockTimeoutMs -> {
+                    // 首轮空（进入空转挂起）；其后信号说有货才真的有，否则兜底轮也空读
+                    return pollCount.incrementAndGet() == 1 || !hasNewData.get()
+                            ? null
+                            : entry;
+                },
+                envelope -> {
+                    delivered.countDown();
+                    return true;
+                },
+                new BatchWorkerGroupConfigPOJO(),
+                ms -> hasNewData.get());
+        dispatcher.setName("test-signal-wake");
+        dispatcher.start();
+
+        Thread.sleep(200);   // 进入空转挂起节奏（兜底周期 100ms）
+        long start = System.nanoTime();
+        hasNewData.set(true);   // 模拟写端落盘按铃
+        assertTrue("信号到达后应取到数据", delivered.await(1, TimeUnit.SECONDS));
+        long costMs = (System.nanoTime() - start) / 1_000_000;
+        assertTrue("信号唤醒应立即取数（实际 " + costMs + "ms）", costMs < 300);
+        dispatcher.stop();
     }
 
     @Test

@@ -126,8 +126,9 @@ public class BatchWorkerGroup<T> {
         // ① 构建 Spool（削峰蓄水池）：拿目录锁 + 起写线程，构造器失败路径自清理
         this.spool = buildSpool();
         // ② 构建 Dispatcher（纯内存接线，不抛）：取数 = spool::poll，投递 = 私有 submitWorker，
-        //    限速每轮读共享配置（热更生效）；config 为 null 时 Dispatcher 不限流，本组必有 config
-        this.dispatcher = new Dispatcher<>(spool::poll, this::submitWorker, config);
+        //    限速每轮读共享配置（热更生效）；config 为 null 时 Dispatcher 不限流，本组必有 config；
+        //    空转等待 = spool::awaitData（写线程落盘按铃、取数侧挂起听铃，微秒级唤醒免空转轮询）
+        this.dispatcher = new Dispatcher<>(spool::poll, this::submitWorker, config, spool::awaitData);
         // ③ 资源齐备才置 running：此后 start 序列不再有失败点，shutdown 的 running 检查不会碰 null
         running = true;
         // ④ 启动全部分区

@@ -12,30 +12,14 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
 /**
- * Group 的分发线程：从 Spool poll 一条 → 阻塞投递到 Worker 队列 → 循环。
+ * Group 的分发线程：从 Spool 取数 → 整封阻塞投递给 Worker 分区队列 → 循环。
+ * 数据链路 {@code Spool(磁盘)} → <b>Dispatcher</b> → Worker 队列 → flushCallback；
+ * 由 {@link BatchWorkerGroup} 创建编排，不拥有路由逻辑（路由在 {@link #deliver} 实现）。
  *
- * <p>数据链路位置：{@code Spool(磁盘)} → <b>Dispatcher</b> → {@code Worker 内存队列} → flushCallback。
- * 由 {@link BatchWorkerGroup} 创建并编排启停。
- *
- * <p>不拥有路由逻辑（路由在 {@link #deliver} 的实现，通常为 Group 私有 {@code submitWorker} 的
- * {@code hash(routingKey) % partitions.size()}）。
- *
- * <p>投递为阻塞 put，队列满时在 {@code deliver} 内部等待空位；已 poll 的条目必须终结
- * （入队成功或毒丸丢弃）才离开，不看 {@code running}（关闭顺序为先 Dispatcher 后 Worker，
- * 关闭时 Worker 仍可接收投递）；仅当投递被放弃（强制关闭中断 / worker 已关闭）时结束线程。
- *
- * <p>限流（漏桶式匀速）：组配置限速后，取数前睡足与上次取数的间隔（空闲超间隔则不睡），
- * 空闲期不积累突发；限速值每轮从共享配置现读，热更后下一次取数起生效。限流等待被强制
- * 关闭中断 → 恢复中断标志结束线程，中断点无在途条目。
- *
- * <p>毒消息两层防线：poll 后反序列化/帧损坏抛异常 → 读位置已推进，打 error 日志后丢弃；
- * 投递时类型不匹配 → {@code deliver} 内部 error 丢弃，均继续循环。
- *
- * <p>中断约定：阻塞投递被 interrupt（强制关闭）→ {@code deliver} 内部丢本条返回 false，
- * 本线程 warn 后结束；空轮 sleep 被 interrupt → 恢复中断标志并结束线程。
- *
- * <p>暂停检查在循环顶部（两条消息之间生效）：PAUSED 时不取数，本条终结后才确认暂停。
- * 暂停/恢复为异步意图：置相位后立即返回，终态由线程自行确认，相位状态机是本类私有实现。
+ * <p>取数侧机制（细节见对应方法）：限流——漏桶匀速、限速值热更下轮生效（{@link #pollWithRateLimit}）；
+ * 空转等待——无数据挂起等写线程落盘信号，兜底周期到点强制真读（{@link #dispatchLoop}）；
+ * 暂停——异步相位、线程自行确认终态（{@link PausePhase}）。
+ * 投递被放弃（强制关闭中断 / worker 已关闭）是唯一中途结束线程的路径，毒消息丢弃后循环继续。
  */
 class Dispatcher<T> {
 
@@ -62,6 +46,15 @@ class Dispatcher<T> {
         EnvelopePOJO<T> poll(long lockTimeoutMs) throws TimeoutException;
     }
 
+    /**
+     * 等待新数据信号（生产接线为 {@code spool::awaitData}，写线程落盘后释放）。
+     * 挂起至多 {@code timeoutMs}；true = 有新落盘应立即真读，false = 超时无信号（走兜底真读）。
+     */
+    @FunctionalInterface
+    interface DataAwaiter {
+        boolean awaitData(long timeoutMs);
+    }
+
     /** 取数函数，生产接线为 {@code spool::poll} */
     private final Poller<T> poller;
 
@@ -76,7 +69,10 @@ class Dispatcher<T> {
     /** 组共享配置（必存），限速值每轮读取；{@code rateLimitPerSecond} 为 null = 未配置不限流 */
     private final BatchWorkerGroupConfigPOJO config;
 
-    /** 上次取数时刻（nanoTime 相对值），null = 尚未取数（首条不限）；仅分发线程访问，无并发 */
+    /** 新数据等待器：true = 有新落盘应立即真读（生产接线 {@code spool::awaitData}）；null = 无信号源，空轮睡满 timeout 后兜底真读 */
+    private final DataAwaiter dataAwaiter;
+
+    /** 上次真取数时刻（nanoTime 相对值），null = 尚未取数（首条不限）；限流间隔与空转兜底共用，仅分发线程访问 */
     private Long lastPollNanos;
 
     /** 分发线程运行标志，{@code false} 时外层 {@link #dispatchLoop} 退出 */
@@ -116,9 +112,19 @@ class Dispatcher<T> {
      *               {@code rateLimitPerSecond} 为 null = 未配置不限流
      */
     Dispatcher(Poller<T> poller, Predicate<EnvelopePOJO<T>> deliver, BatchWorkerGroupConfigPOJO config) {
+        this(poller, deliver, config, null);
+    }
+
+    /**
+     * @param dataAwaiter 新数据等待器（生产接线为 {@code spool::awaitData}）；
+     *                    null = 无信号源（测试假 poller），空轮退化为睡满 timeout 后兜底真读
+     */
+    Dispatcher(Poller<T> poller, Predicate<EnvelopePOJO<T>> deliver, BatchWorkerGroupConfigPOJO config,
+               DataAwaiter dataAwaiter) {
         this.poller = Objects.requireNonNull(poller, "poller must not be null");
         this.deliver = Objects.requireNonNull(deliver, "deliver must not be null");
         this.config = Objects.requireNonNull(config, "config must not be null");
+        this.dataAwaiter = dataAwaiter;
     }
 
     /**
@@ -193,11 +199,12 @@ class Dispatcher<T> {
     }
 
     /**
-     * 分发主循环（在独立线程中运行）：
-     * poll 一条 → 非空则投递 → 空则短睡 → 重复。
-     * <p>异常分支：锁超时 continue；反序列化失败 error 后 continue；空轮 sleep。
+     * 分发主循环（独立线程运行）：无数据时挂起等待写线程落盘信号（微秒级唤醒），
+     * 信号到达或兜底周期到点才真读；读到数据满速连读至空，读空回到挂起。
+     * <p>异常分支：锁超时 / 反序列化失败均 continue 不退出；等待被中断则恢复标志退出。
      */
     private void dispatchLoop() {
+        boolean empty = false;  // 初始按可能有数据处理：首轮立即真读覆盖重启积压；此后上轮读空才挂起等铃
         while (running) {
             // 暂停检查：两条消息之间生效；PAUSED 时不取数，恢复后从读位置续读
             PausePhase phase = pausePhase.get();
@@ -217,6 +224,12 @@ class Dispatcher<T> {
                 continue;   // 切换失败（相位已变）：重读，勿直接取数
             }
 
+            // 空转挂起：等写线程落盘信号（数据到达微秒级唤醒），无信号且未到兜底周期不空读。
+            // 兜底防御：信号机制不确定哪里会出问题，每 LOOP_SLEEP_MS 无视信号强制真读，失灵时最坏退化回固定 100ms 轮询
+            if (empty && !awaitSignal(LOOP_SLEEP_MS) && !realPollDue()) {
+                continue;
+            }
+
             EnvelopePOJO<T> entry;
             try {
                 entry = pollWithRateLimit();
@@ -227,17 +240,36 @@ class Dispatcher<T> {
                 continue;
             }
 
-            if (entry == null) {
-                try {
-                    Thread.sleep(LOOP_SLEEP_MS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-                continue;
+            empty = (entry == null);   // 读到数据满速连读至空，读空回到挂起等信号
+            if (entry != null) {
+                deliverEntry(entry);
             }
+        }
+    }
 
-            deliverEntry(entry);
+    // ======================== 空转等待（信号唤醒 + 兜底防御） ========================
+
+    /** 等待新数据信号：无信号源（{@code dataAwaiter} 为 null，测试假 poller）时退化为睡满 timeoutMs */
+    private boolean awaitSignal(long timeoutMs) {
+        return dataAwaiter != null ? dataAwaiter.awaitData(timeoutMs) : sleepQuietly(timeoutMs);
+    }
+
+    /** 兜底防御：距上次真取数满 {@code LOOP_SLEEP_MS} 则无视信号强制真读，信号失灵时最坏退化回固定 100ms 轮询 */
+    private boolean realPollDue() {
+        return lastPollNanos == null
+                || System.nanoTime() - lastPollNanos >= LOOP_SLEEP_MS * 1_000_000L;
+    }
+
+    /**
+     * 可中断的空轮睡眠（仅无信号源退化路径使用）：被中断（强制关闭）→ 恢复中断标志并返回 false。
+     */
+    private boolean sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -264,8 +296,9 @@ class Dispatcher<T> {
                     }
                 }
             }
-            lastPollNanos = System.nanoTime();
         }
+        // 无条件记录本次真取数时刻：限流间隔与空转兜底（realPollDue）共用同一时间基准
+        lastPollNanos = System.nanoTime();
         return poller.poll(POLL_LOCK_TIMEOUT_MS);
     }
 

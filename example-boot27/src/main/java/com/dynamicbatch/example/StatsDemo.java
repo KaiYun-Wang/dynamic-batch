@@ -27,7 +27,7 @@ public class StatsDemo {
 
     private static final String GROUP = "stats_demo";
     /** 生产速率：每 5ms 提交一条 = 200 条/秒 */
-    private static final long SUBMIT_INTERVAL_MS = 5L;
+    private static final long SUBMIT_INTERVAL_MS = 1L;
 
     public static void main(String[] args) throws InterruptedException {
         // 纯 main 不走 Spring，application.yml 的 logging.level 不生效，直接调 root 到 INFO
@@ -45,12 +45,12 @@ public class StatsDemo {
                                 batch -> { })   // 回调啥也不干
                         .partitionCount(2)
                         .queueCapacity(1024)
-                        .batchSize(100)
-                        .maxWaitMs(1000)
+                        .batchSize(1)
+                        .maxWaitMs(0)
                         .statsConfig(StatsConfigPOJO.builder()
                                 .collectIntervalMillis(30_000L)
                                 .percentiles(0.5, 0.9, 0.95, 0.99,0.999)
-                                .rtBuckets(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000)
+                                .rtBuckets(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
                                 .build())
                         .build());
 

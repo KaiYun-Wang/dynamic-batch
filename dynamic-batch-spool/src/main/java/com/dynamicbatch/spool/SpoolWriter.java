@@ -1,16 +1,16 @@
 package com.dynamicbatch.spool;
 
+import java.io.Closeable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import net.openhft.chronicle.bytes.Bytes;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.ExcerptAppender;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.Closeable;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Spool 写路径：单写线程 + 有界暂存队列。
@@ -36,6 +36,8 @@ class SpoolWriter implements Closeable {
     private volatile boolean running;
     /** 后台单写线程 */
     private Thread writeThread;
+    /** 新数据信号：写侧边沿触发（无未消费信号时才按铃），许可恒 ≤1，取数侧挂起等待 */
+    private final Semaphore newDataSignal = new Semaphore(0);
 
     SpoolWriter(SpoolConfig config, ChronicleQueue chronicleQueue) {
         this.config = config;
@@ -95,6 +97,29 @@ class SpoolWriter implements Closeable {
         appender.sync();
     }
 
+    /** 落盘单条并按响新数据信号：全部写路径唯一收口 */
+    private void writeOne(byte[] data) {
+        appender.writeBytes(Bytes.wrapForRead(data));
+        // 写侧边沿触发：无未消费信号才按铃（单写线程判定精确），许可恒 ≤1 杜绝积压溢出
+        if (newDataSignal.availablePermits() == 0) {
+            newDataSignal.release();
+        }
+    }
+    
+    /**
+     * 等待新落盘信号（取数侧经 {@link Spool#awaitData} 转发）：挂起至多 timeoutMs，
+     * true = 有新落盘应立即 poll，false = 超时（调用方兜底真读）或被中断（恢复标志）。
+     * 信号为写侧边沿触发（恒 ≤1 个未消费许可），消费即拿走唯一许可，无需读侧清理存量。
+     */
+    boolean awaitData(long timeoutMs) {
+        try {
+            return newDataSignal.tryAcquire(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
     private void writeLoop() {
         List<byte[]> batch = new ArrayList<>();
 
@@ -106,7 +131,7 @@ class SpoolWriter implements Closeable {
                 batch.add(data);
                 stagingQueue.drainTo(batch, DRAIN_MAX);
                 for (byte[] b : batch) {
-                    appender.writeBytes(Bytes.wrapForRead(b));
+                    writeOne(b);
                 }
                 batch.clear();
             } catch (InterruptedException e) {
@@ -123,7 +148,7 @@ class SpoolWriter implements Closeable {
         if (!remaining.isEmpty()) {
             log.info("draining {} remaining entries on close", remaining.size());
             for (byte[] b : remaining) {
-                appender.writeBytes(Bytes.wrapForRead(b));
+                writeOne(b);
             }
         }
         appender.sync();

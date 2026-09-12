@@ -209,6 +209,19 @@ public class Spool<T> implements Closeable {
         if (bytes == null) return null;
         return serializer.deserialize(bytes, type);
     }
+    
+    /**
+     * 等待新数据信号：写线程每落盘一条释放一次，本方法挂起至多 {@code timeoutMs}。
+     * <p>true = 有新落盘应立即 {@link #poll}（进程内唤醒，微秒级）；
+     * false = 超时无信号（调用方应兜底真读）或被中断。信号不跨进程——
+     * 重启积压等无信号场景由取数侧兜底真读发现，不丢数据。
+     *
+     * @param timeoutMs 最长等待（毫秒）
+     * @return true = 有新落盘写入；false = 超时或被中断
+     */
+    public boolean awaitData(long timeoutMs) {
+        return writer.awaitData(timeoutMs);
+    }
 
     /** 暂存队列当前积压条数 */
     public int stagingSize() {
