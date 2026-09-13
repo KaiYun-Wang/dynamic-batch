@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>SinglePartitionPerf — 消息大小对比</title>
+<script src="chart.umd.min.js"></script>
+<style>
+:root{--bg:#f7f5f0;--card:#fff;--ink:#1a1a1a;--muted:#5c5c5c;--line:#e4e0d8;}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.5 'Segoe UI',system-ui,sans-serif;color:var(--ink);background:var(--bg)}
+header{padding:28px 32px 8px;max-width:1100px;margin:0 auto}
+h1{margin:0 0 8px;font-size:1.55rem;letter-spacing:-0.02em}
+.meta{color:var(--muted);font-size:0.9rem}
+main{max-width:1100px;margin:0 auto;padding:8px 32px 48px;display:grid;gap:20px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px 22px 16px}
+section h2{margin:0 0 4px;font-size:1.1rem}
+section p.hint{margin:0 0 14px;color:var(--muted);font-size:0.88rem}
+.chart-box{position:relative;height:300px}
+table{width:100%;border-collapse:collapse;margin-top:12px;font-size:0.92rem}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:600;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.04em}
+footer{max-width:1100px;margin:0 auto;padding:0 32px 40px;color:var(--muted);font-size:0.85rem}
+</style></head><body>
+<header><h1>SinglePartitionPerf — 消息大小对比</h1><div class="meta">java 1.8.0_201 · Windows 10 amd64 · <b>20 核 / 16G</b> · 100 rounds median · 相对 128B=1.00x</div></header>
+<main>
+<section><h2>1. QPS（条/s）</h2><p class="hint">maxQps：极限灌入吞吐。</p><div class="chart-box"><canvas id="cQps"></canvas></div><table><thead><tr><th>size</th><th>msg/s</th><th>相对 128B</th></tr></thead><tbody><tr><td>128B</td><td>1,689,049</td><td>1.00x</td></tr><tr><td>256B</td><td>1,155,420</td><td>0.68x</td></tr><tr><td>4096B</td><td>244,185</td><td>0.14x</td></tr><tr><td>65536B</td><td>17,906</td><td>0.01x</td></tr></tbody></table></section>
+<section><h2>2. 字节吞吐（MB/s）</h2><p class="hint">同一 maxQps 场景的有效带宽。</p><div class="chart-box"><canvas id="cMbps"></canvas></div><table><thead><tr><th>size</th><th>MB/s</th><th>相对 128B</th></tr></thead><tbody><tr><td>128B</td><td>206</td><td>1.00x</td></tr><tr><td>256B</td><td>282</td><td>1.37x</td></tr><tr><td>4096B</td><td>954</td><td>4.63x</td></tr><tr><td>65536B</td><td>1119</td><td>5.43x</td></tr></tbody></table></section>
+<section><h2>3. 延迟 TP（µs）</h2><p class="hint">minTp：ping-pong / 单条在途。点击图例可勾选/隐藏 tp50·tp90·tp95·tp99·tp99.9。</p><div class="chart-box"><canvas id="cTp"></canvas></div><table><thead><tr><th>size</th><th>tp50</th><th>tp90</th><th>tp95</th><th>tp99</th><th>tp99.9</th><th>相对 128B tp50</th></tr></thead><tbody><tr><td>128B</td><td>17.200</td><td>20.200</td><td>21.200</td><td>66.800</td><td>210.507</td><td>1.00x</td></tr><tr><td>256B</td><td>17.100</td><td>20.300</td><td>21.300</td><td>69.202</td><td>205.102</td><td>0.99x</td></tr><tr><td>4096B</td><td>21.800</td><td>24.300</td><td>25.300</td><td>112.530</td><td>237.412</td><td>1.27x</td></tr><tr><td>65536B</td><td>71.000</td><td>126.110</td><td>191.305</td><td>250.008</td><td>459.117</td><td>4.13x</td></tr></tbody></table></section>
+</main>
+<footer>maxQps 看吞吐；minTp 看 ping-pong / 单条在途延迟。图例可点。<br/>口径：单分区、字节透传（无序列化）、空回调；测的是攒批链路上限，不含业务序列化与业务处理。</footer>
+<script>
+const labels=["128B","256B","4096B","65536B"];
+const tpLabels=["128B","256B","4096B","65536B"];
+const tip={callbacks:{label:c=>c.dataset.label+': '+Number(c.raw).toLocaleString(undefined,{maximumFractionDigits:3})}};
+const base={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:tip},scales:{x:{grid:{display:false},ticks:{font:{size:13}}},y:{beginAtZero:true,grid:{color:'#eee'},ticks:{font:{size:12}}}}};
+new Chart(document.getElementById('cQps'),{type:'bar',data:{labels,datasets:[{label:'msg/s',data:[1689049,1155420,244185,17906],backgroundColor:'#1f6f5b',borderRadius:6,maxBarThickness:64}]},options:base});
+new Chart(document.getElementById('cMbps'),{type:'bar',data:{labels,datasets:[{label:'MB/s',data:[206.2,282.1,953.8,1119.1],backgroundColor:'#c45c26',borderRadius:6,maxBarThickness:64}]},options:base});
+new Chart(document.getElementById('cTp'),{type:'bar',data:{labels:tpLabels,datasets:[{label:'tp50 µs',data:[17.200,17.100,21.800,71.000],backgroundColor:'#2c5f8a',borderRadius:4,maxBarThickness:40},{label:'tp90 µs',data:[20.200,20.300,24.300,126.110],backgroundColor:'#1f6f5b',borderRadius:4,maxBarThickness:40},{label:'tp95 µs',data:[21.200,21.300,25.300,191.305],backgroundColor:'#c45c26',borderRadius:4,maxBarThickness:40},{label:'tp99 µs',data:[66.800,69.202,112.530,250.008],backgroundColor:'#6b4c9a',borderRadius:4,maxBarThickness:40},{label:'tp99.9 µs',data:[210.507,205.102,237.412,459.117],backgroundColor:'#8b3a3a',borderRadius:4,maxBarThickness:40}]},options:Object.assign({},base,{plugins:{legend:{position:'top'},tooltip:tip}})});
+</script></body></html>

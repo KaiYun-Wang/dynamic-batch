@@ -42,9 +42,13 @@ public class Spool<T> implements Closeable {
     /** 数据滚动文件后缀 */
     static final String DATA_FILE_SUFFIX = SingleChronicleQueue.SUFFIX;
 
-    // Chronicle 全局开关：关启动公告；允许多线程通过同一 queue 创建 appender/tailer（本模块自行串行化写/读）
+    // Chronicle 全局开关：必须在首次建 Queue / 触达 Analytics 之前设置
+    // - announcer：启动横幅
+    // - analytics：向 Google Analytics 上报（内网/墙外连不上 → SocketTimeoutException: connect timed out）
+    // - single.threaded.check：本模块自行串行化写/读
     static {
         System.setProperty("chronicle.announcer.disable", "true");
+        System.setProperty("chronicle.analytics.disable", "true");
         System.setProperty("disable.single.threaded.check", "true");
     }
 

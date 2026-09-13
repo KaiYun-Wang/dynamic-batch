@@ -19,6 +19,7 @@
         <module>dynamic-batch-spool</module>
         <module>dynamic-batch-spring</module>
         <module>dynamic-batch-spring-boot-starter</module>
+        <module>dynamic-batch-benchmark</module>
         <module>example-boot27</module>
     </modules>
 
@@ -34,6 +35,8 @@
 
         <maven-compiler-plugin.version>3.11.0</maven-compiler-plugin.version>
         <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
+        <!-- JDK8 默认空；JDK9+ 由 jdk9-plus profile 覆盖（Chronicle / exec:java / surefire） -->
+        <argLine></argLine>
     </properties>
 
     <dependencyManagement>

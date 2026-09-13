@@ -36,6 +36,8 @@ class SpoolReader implements Closeable {
     private final ChronicleQueue chronicleQueue;
     /** 命名 tailer：读位置自动持久化，重启可续读 */
     private final ExcerptTailer tailer;
+    /** 读缓冲复用，避免每条 allocateElasticDirect 泄漏直内存 */
+    private final Bytes<?> readBuffer = Bytes.allocateElasticDirect();
 
     SpoolReader(SpoolConfig config, ChronicleQueue chronicleQueue) {
         this.config = config;
@@ -67,9 +69,9 @@ class SpoolReader implements Closeable {
             throw new TimeoutException("lock acquire timeout after " + lockTimeoutMs + "ms");
         }
         try {
-            Bytes<?> bytes = Bytes.allocateElasticDirect();
-            if (tailer.readBytes(bytes)) {
-                return bytes.toByteArray();
+            readBuffer.clear();
+            if (tailer.readBytes(readBuffer)) {
+                return readBuffer.toByteArray();
             }
             return null; // 队列空，立即返回
         } finally {
@@ -81,6 +83,11 @@ class SpoolReader implements Closeable {
     public void close() {
         // 关闭前把 index 刷下去
         syncIndex();
+        try {
+            readBuffer.releaseLast();
+        } catch (Exception e) {
+            log.warn("release readBuffer failed", e);
+        }
         log.info("spool reader closed");
     }
 
