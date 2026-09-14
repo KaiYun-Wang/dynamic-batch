@@ -6,11 +6,11 @@
 
     <groupId>com.dynamicbatch</groupId>
     <artifactId>dynamic-batch</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>pom</packaging>
 
     <name>Dynamic Batch</name>
-    <description>轻量进程内攒批</description>
+    <description>轻量级可监控动态批处理框架</description>
 
     <modules>
         <module>dynamic-batch-dependencies</module>

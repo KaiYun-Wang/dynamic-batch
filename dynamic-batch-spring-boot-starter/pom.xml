@@ -6,12 +6,12 @@
     <parent>
         <groupId>com.dynamicbatch</groupId>
         <artifactId>dynamic-batch</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </parent>
 
     <artifactId>dynamic-batch-spring-boot-starter</artifactId>
     <name>dynamic-batch-spring-boot-starter</name>
-    <description>Spring Boot Starter：自动装配入口（spring.factories + AutoConfiguration.imports）</description>
+    <description>Spring Boot Starter：自动装配入口</description>
 
     <dependencies>
         <dependency>

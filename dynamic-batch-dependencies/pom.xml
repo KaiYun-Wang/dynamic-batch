@@ -7,11 +7,11 @@
     <!-- 空壳 BOM：后续统一对外管理各模块版本 -->
     <groupId>com.dynamicbatch</groupId>
     <artifactId>dynamic-batch-dependencies</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>pom</packaging>
 
     <name>dynamic-batch-dependencies</name>
-    <description>【空壳】对外 BOM，待填充</description>
+    <description>对外 BOM</description>
 
     <dependencyManagement>
         <dependencies>

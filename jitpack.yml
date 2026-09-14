@@ -1,0 +1,7 @@
+# JitPack 构建机配置
+# jdk 字段名必须写成 openjdkN（JitPack 约定，表示 OpenJDK 发行版）。
+# 本仓库依赖 Chronicle-Queue 2026.x，需用 17 才能装依赖。
+jdk:
+  - openjdk17
+install:
+  - mvn install -DskipTests -pl dynamic-batch-spring-boot-starter -am

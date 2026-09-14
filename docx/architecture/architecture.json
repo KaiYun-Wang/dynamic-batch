@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Dynamic Batch 架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1380, 690],
+    "views": [
+      {
+        "id": "route",
+        "label": "主链路与路由",
+        "focus": ["app", "processor", "group-a", "spool", "dispatcher", "p0", "p1", "p2", "sink"],
+        "note": "submit 先落 Spool 削峰，分发线程漏桶限速取数并按 routingKey 取模投递分区，攒满批或超时 flush 下游。"
+      },
+      {
+        "id": "observe",
+        "label": "运维与告警",
+        "focus": ["ops", "stats", "group-a", "notify"],
+        "note": "运维端点支持查询快照与热更调参，旁路主链路；任意环节异常均可触发全局通知告警（钉钉 / 企微 / 邮件）。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "app",
+      "type": "external",
+      "label": "业务应用",
+      "sublabel": "Spring Boot",
+      "pos": [20, 270],
+      "size": [130, 64]
+    },
+    {
+      "id": "processor",
+      "type": "backend",
+      "label": "BatchProcessor",
+      "sublabel": "统一入口 submit()",
+      "pos": [192, 270],
+      "size": [150, 64]
+    },
+    {
+      "id": "ops",
+      "type": "frontend",
+      "label": "运维端点",
+      "sublabel": "查询 / 调参 / 热更",
+      "pos": [192, 80],
+      "size": [150, 60]
+    },
+    {
+      "id": "stats",
+      "type": "backend",
+      "label": "统计采集 · 回调钩子",
+      "sublabel": "记录快照 · 计算 QPS / TP",
+      "pos": [389, 80],
+      "size": [160, 60]
+    },
+    {
+      "id": "group-a",
+      "type": "backend",
+      "label": "业务组 A",
+      "sublabel": "BatchWorkerGroup",
+      "pos": [394, 270],
+      "size": [150, 64]
+    },
+    {
+      "id": "group-b",
+      "type": "backend",
+      "label": "业务组 B",
+      "sublabel": "内部同构（略）",
+      "pos": [394, 420],
+      "size": [150, 64]
+    },
+    {
+      "id": "spool",
+      "type": "messagebus",
+      "label": "Spool 磁盘缓冲",
+      "sublabel": "先落盘削峰",
+      "pos": [606, 270],
+      "size": [140, 64]
+    },
+    {
+      "id": "dispatcher",
+      "type": "backend",
+      "label": "分发线程",
+      "sublabel": "Dispatcher · 漏桶限流",
+      "pos": [796, 270],
+      "size": [150, 64]
+    },
+    {
+      "id": "p0",
+      "type": "backend",
+      "label": "分区 Worker 0",
+      "sublabel": "单线程攒批",
+      "pos": [1030, 110],
+      "size": [130, 56]
+    },
+    {
+      "id": "p1",
+      "type": "backend",
+      "label": "分区 Worker 1",
+      "sublabel": "单线程攒批",
+      "pos": [1030, 274],
+      "size": [130, 56]
+    },
+    {
+      "id": "p2",
+      "type": "backend",
+      "label": "分区 Worker 2",
+      "sublabel": "单线程攒批",
+      "pos": [1030, 438],
+      "size": [130, 56]
+    },
+    {
+      "id": "sink",
+      "type": "external",
+      "label": "flush 下游",
+      "sublabel": "DB / API / 自定义回调",
+      "pos": [1222, 270],
+      "size": [140, 64]
+    },
+    {
+      "id": "notify",
+      "type": "cloud",
+      "label": "告警通知",
+      "sublabel": "全局 · 钉钉 / 企微 / 邮件",
+      "pos": [615, 580],
+      "size": [150, 64]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "业务组 A 内部（每个业务组一套）",
+      "wraps": ["spool", "dispatcher", "p0", "p1", "p2"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "app-submit",
+      "from": "app",
+      "to": "processor",
+      "label": "submit",
+      "variant": "emphasis"
+    },
+    {
+      "id": "proc-ga",
+      "from": "processor",
+      "to": "group-a",
+      "label": "按组名"
+    },
+    {
+      "id": "proc-gb",
+      "from": "processor",
+      "to": "group-b",
+      "label": "按组名"
+    },
+    {
+      "id": "ga-spool",
+      "from": "group-a",
+      "to": "spool",
+      "label": "落盘削峰"
+    },
+    {
+      "id": "spool-disp",
+      "from": "spool",
+      "to": "dispatcher",
+      "label": "poll"
+    },
+    {
+      "id": "disp-p0",
+      "from": "dispatcher",
+      "to": "p0",
+      "label": "routingKey 取模",
+      "labelSegment": 1
+    },
+    {
+      "id": "disp-p1",
+      "from": "dispatcher",
+      "to": "p1"
+    },
+    {
+      "id": "disp-p2",
+      "from": "dispatcher",
+      "to": "p2"
+    },
+    {
+      "id": "p0-sink",
+      "from": "p0",
+      "to": "sink"
+    },
+    {
+      "id": "p1-sink",
+      "from": "p1",
+      "to": "sink",
+      "variant": "emphasis"
+    },
+    {
+      "id": "p2-sink",
+      "from": "p2",
+      "to": "sink"
+    },
+    {
+      "id": "ops-proc",
+      "from": "ops",
+      "to": "processor",
+      "label": "查询 / 调参",
+      "variant": "dashed",
+      "labelAt": [267, 205]
+    },
+    {
+      "id": "ga-stats",
+      "from": "group-a",
+      "to": "stats",
+      "label": "submit / flush / RT",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "两级路由",
+      "items": [
+        "第一级：BatchProcessor 按 groupKey 选 BatchWorkerGroup",
+        "第二级：组内按 routingKey.hashCode() 取模选分区，同一 key 恒入同一分区",
+        "分区内 FIFO + 单线程消费 = 严格有序"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "削峰与限流",
+      "items": [
+        "submit 只写 Spool 磁盘缓冲即返回，不打满业务线程",
+        "分发线程按 rateLimitPerSecond 漏桶限速取数，运行时可热更",
+        "Worker 攒满 batchSize 或超 maxWaitMs 触发 flushCallback"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "统计与告警",
+      "items": [
+        "submit / flush / RT 记入组共享统计，周期快照回调 StatsListener 钩子",
+        "flush 失败走 failureHandler；任意环节异常均可触发全局告警（钉钉 / 企微 / 邮件）",
+        "flushCallback 写到 DB / API 由业务回调决定，SPI 可扩展"
+      ]
+    }
+  ]
+}

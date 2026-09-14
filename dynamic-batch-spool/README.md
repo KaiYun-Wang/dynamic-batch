@@ -87,9 +87,9 @@ Spool 的定时 sync 把这个窗口从 ~30 秒收窄到 `flushIntervalMs`（默
 
 ```xml
 <dependency>
-    <groupId>com.dynamicbatch</groupId>
+    <groupId>com.github.KaiYun-Wang.dynamic-batch</groupId>
     <artifactId>dynamic-batch-spool</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 

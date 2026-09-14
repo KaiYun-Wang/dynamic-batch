@@ -6,12 +6,12 @@
     <parent>
         <groupId>com.dynamicbatch</groupId>
         <artifactId>dynamic-batch</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </parent>
 
     <artifactId>example-boot35</artifactId>
     <name>example-boot35</name>
-    <description>示例：Spring Boot 3.3.5 + JDK17 冒烟（仅 BatchTestController）</description>
+    <description>Spring Boot 3.x 示例</description>
 
     <properties>
         <!-- 本模块用 JDK17 / Boot 3.3.5 验证兼容性；库本身仍是 Java 8 字节码 -->
@@ -41,7 +41,7 @@
                 <version>${spring-boot35.version}</version>
                 <configuration>
                     <mainClass>com.dynamicbatch.example.boot35.ExampleBoot35Application</mainClass>
-                    <!-- Chronicle 在 JDK17 运行需要；本 example 自管，不依赖根 POM -->
+                    <!-- Chronicle �?JDK17 运行需要；�?example 自管，不依赖�?POM -->
                     <jvmArguments>
                         --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
                         --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED

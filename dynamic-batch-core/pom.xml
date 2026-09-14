@@ -6,12 +6,12 @@
     <parent>
         <groupId>com.dynamicbatch</groupId>
         <artifactId>dynamic-batch</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </parent>
 
     <artifactId>dynamic-batch-core</artifactId>
     <name>dynamic-batch-core</name>
-    <description>进程内攒批引擎</description>
+    <description>轻量级动态批处理引擎</description>
 
     <dependencies>
         <dependency>
@@ -47,7 +47,7 @@
         </dependency>
     </dependencies>
 
-    <!-- JDK17+ 集成测拉起 Spool/Chronicle 需要；JDK8 不激活 -->
+    <!-- JDK17+ 集成测拉�?Spool/Chronicle 需要；JDK8 不激�?-->
     <profiles>
         <profile>
             <id>jdk9-plus</id>

@@ -6,12 +6,12 @@
     <parent>
         <groupId>com.dynamicbatch</groupId>
         <artifactId>dynamic-batch</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </parent>
 
     <artifactId>example-boot27</artifactId>
     <name>example-boot27</name>
-    <description>示例：依赖 starter 自动装配，用法对齐 yikekong BatchWriterConfiguration</description>
+    <description>Spring Boot 2.7 示例</description>
 
     <dependencies>
         <dependency>
@@ -26,7 +26,7 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter</artifactId>
         </dependency>
-        <!-- 通知自测入口（NotifyTestController）依赖 -->
+        <!-- 通知自测入口（NotifyTestController）依�?-->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
