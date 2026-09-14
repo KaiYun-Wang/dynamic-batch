@@ -7,7 +7,8 @@ import com.dynamicbatch.common.pojo.NotifyPlatformPOJO;
  *
  * <p>实现类代表一个通知渠道（钉钉、企业微信、邮件……），通过 {@link #platform()}
  * 声明自己的平台名，由 {@link NotifierRegistry} 统一注册与分发。
- * 新增渠道只需实现本接口并通过 SPI 注册，无需改动核心逻辑。
+ * 新增渠道：内置可直接改注册表；带额外依赖的渠道对齐 dynamic-tp，
+ * 放独立扩展 / 用 {@code @ConditionalOnClass} 装配，勿写进 core 的 SPI。
  * 设计参考 dromara dynamic-tp 的 common/notifier 模块。
  */
 public interface Notifier {

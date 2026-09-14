@@ -48,7 +48,7 @@ public class DingNotifier extends AbstractNotifier {
                 .body(body)
                 .execute()
                 .body();
-        log.info("ding notify sent, url={}, response={}", url, resp);
+        log.debug("ding notify sent, url={}, response={}", url, resp);
     }
 
     /**

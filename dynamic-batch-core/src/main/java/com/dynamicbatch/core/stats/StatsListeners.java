@@ -30,7 +30,7 @@ public final class StatsListeners {
             throw new IllegalArgumentException("listener must not be null");
         }
         LISTENERS.add(listener);
-        log.info("stats listener registered, listener={}, total={}",
+        log.debug("stats listener registered, listener={}, total={}",
                 listener.getClass().getName(), LISTENERS.size());
     }
 
@@ -46,7 +46,7 @@ public final class StatsListeners {
         }
         boolean removed = LISTENERS.remove(listener);
         if (removed) {
-            log.info("stats listener unregistered, listener={}, total={}",
+            log.debug("stats listener unregistered, listener={}, total={}",
                     listener.getClass().getName(), LISTENERS.size());
         }
         return removed;

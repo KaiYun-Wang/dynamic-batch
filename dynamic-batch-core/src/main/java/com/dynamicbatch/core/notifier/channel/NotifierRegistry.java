@@ -12,10 +12,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 通知渠道注册表。
  *
- * <p>单例；按平台名维护渠道实例，发送时根据 {@link NotifyPlatformPOJO#getPlatform()}
- * 找到对应渠道并委托。构造时注册内置渠道（钉钉、企业微信），邮箱等通过 SPI
- * 加载并由 {@link Notifier#supports()} 过滤不可用的实现。
- * 设计参考 dromara dynamic-tp 的 core/handler/NotifierHandler。
+ * <p>对齐 dynamic-tp {@code NotifierHandler}：构造时注册内置渠道（钉钉、企业微信），
+ * 再通过 SPI 加载<strong>外部扩展包</strong>里的渠道。邮件不在 core SPI 里，
+ * 由 Spring {@code NotifyEmailAutoConfiguration} 在存在 mail 依赖时注册。
  */
 public class NotifierRegistry {
 
@@ -29,20 +28,16 @@ public class NotifierRegistry {
         loadSpiNotifiers();
     }
 
-    /**
-     * 通过 SPI 加载外部渠道（如邮箱），按 supports() 过滤。
-     */
+    /** SPI：仅加载独立扩展 jar 声明的渠道（core 自身不往 META-INF/services 写邮件）。 */
     private void loadSpiNotifiers() {
         List<Notifier> loaded = ExtensionServiceLoader.get(Notifier.class);
-        if (loaded == null) {
+        if (loaded == null || loaded.isEmpty()) {
             return;
         }
         for (Notifier n : loaded) {
             if (n.supports()) {
                 register(n);
                 log.info("SPI notifier registered: {}", n.getClass().getSimpleName());
-            } else {
-                log.info("SPI notifier skipped (supports()=false): {}", n.getClass().getSimpleName());
             }
         }
     }

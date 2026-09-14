@@ -41,7 +41,7 @@ public class WechatNotifier extends AbstractNotifier {
                 .body(body)
                 .execute()
                 .body();
-        log.info("wechat notify sent, url={}, response={}", url, resp);
+        log.debug("wechat notify sent, url={}, response={}", url, resp);
     }
 
     /**

@@ -83,7 +83,7 @@ public class BatchWorker<T> {
         consumerThread = new Thread(this::consumeLoop, "batch-processor-" + name);
         consumerThread.setDaemon(true);
         consumerThread.start();
-        log.info("[{}] worker started, queueCapacity={}, batchSize={}",
+        log.debug("[{}] worker started, queueCapacity={}, batchSize={}",
                 name, config.getQueueCapacity(), config.getBatchSize());
     }
 
@@ -171,7 +171,7 @@ public class BatchWorker<T> {
         // 收尾（消费线程自己执行，不阻塞关闭流程）：先清中断标志，避免用户回调带着中断收尾全量失败
         boolean interrupted = Thread.interrupted();
         if (!batch.isEmpty()) {
-            log.info("[{}] flushing {} remaining records before exit", name, batch.size());
+            log.debug("[{}] flushing {} remaining records before exit", name, batch.size());
             flushAndRecord(batch, batchPayload);
         }
         flushRemaining();
@@ -251,7 +251,7 @@ public class BatchWorker<T> {
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         requestStop(deadlineNanos);
         if (awaitStop(deadlineNanos)) {
-            log.info("[{}] worker stopped", name);
+            log.debug("[{}] worker stopped", name);
         }
     }
 
@@ -322,7 +322,7 @@ public class BatchWorker<T> {
         List<EnvelopePOJO<T>> remaining = new ArrayList<>();
         queue.drainTo(remaining);
         if (!remaining.isEmpty()) {
-            log.info("[{}] flushing {} remaining items on shutdown", name, remaining.size());
+            log.debug("[{}] flushing {} remaining items on shutdown", name, remaining.size());
             List<T> payloadBuffer = new ArrayList<>(Math.min(config.getBatchSize(), remaining.size()));
             for (int i = 0; i < remaining.size(); i += config.getBatchSize()) {
                 if (flushDeadlinePassed()) {

@@ -21,6 +21,7 @@
         <module>dynamic-batch-spring-boot-starter</module>
         <module>dynamic-batch-benchmark</module>
         <module>example-boot27</module>
+        <module>example-boot35</module>
     </modules>
 
     <properties>
@@ -35,8 +36,6 @@
 
         <maven-compiler-plugin.version>3.11.0</maven-compiler-plugin.version>
         <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
-        <!-- JDK8 默认空；JDK9+ 由 jdk9-plus profile 覆盖（Chronicle / exec:java / surefire） -->
-        <argLine></argLine>
     </properties>
 
     <dependencyManagement>
@@ -148,19 +147,4 @@
             </plugin>
         </plugins>
     </build>
-
-    <profiles>
-        <!-- JDK 9+ 运行 Chronicle-Queue 所需 JVM 参数（清单与 OpenHFT root-parent-pom 2026.0 的 java17 profile 一致）。
-             JDK8 下 profile 不激活、零影响；core / spool 模块测试拉起真实 Chronicle 时（JDK17 环境必须）由
-             surefire 自动拾取 ${argLine}。 -->
-        <profile>
-            <id>jdk9-plus</id>
-            <activation>
-                <jdk>[9,)</jdk>
-            </activation>
-            <properties>
-                <argLine>--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=jdk.compiler/com.sun.tools.javac=ALL-UNNAMED</argLine>
-            </properties>
-        </profile>
-    </profiles>
 </project>

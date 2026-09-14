@@ -167,7 +167,7 @@ class Dispatcher<T> {
         thread = new Thread(this::dispatchLoop, "batch-processor-" + name);
         thread.setDaemon(true);
         thread.start();
-        log.info("[{}] dispatcher started", name);
+        log.debug("[{}] dispatcher started", name);
     }
 
     /** 置停止信号：仅写 volatile 标志，µs 级返回，不等线程退出 */
@@ -208,7 +208,7 @@ class Dispatcher<T> {
         boolean clean = !thread.isAlive();
         thread = null;
         if (clean) {
-            log.info("[{}] dispatcher stopped", name);
+            log.debug("[{}] dispatcher stopped", name);
         } else {
             log.error("[{}] dispatcher abandoned, shutdown budget exhausted", name);
         }

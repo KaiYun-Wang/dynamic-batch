@@ -17,29 +17,18 @@ import java.util.Properties;
 /**
  * 邮件通知渠道。
  *
- * <p>读取 {@link NotifyPlatformPOJO} 中的 SMTP 参数（host/port/username/password/title）
- * 直接发送邮件，不依赖 Spring Boot MailSenderAutoConfiguration。
- * 通过 SPI 加载，{@link #supports()} 探测 classpath 中是否存在
- * {@code javax.mail.Session}；不存在时静默跳过，不影响其他渠道。
- * 设计参考 dromara dynamic-tp 的 extension-notify-email 模块。
+ * <p>读取 {@link NotifyPlatformPOJO} 中的 SMTP 参数直接发信。
+ * 对齐 dynamic-tp：不放进 core 的 SPI；由 Spring 侧
+ * {@code NotifyEmailAutoConfiguration} 在 classpath 存在 {@code javax.mail.Session}
+ * 时注册。未引入 mail 依赖时本类不会被加载，零噪音。
  */
 public class EmailNotifier extends AbstractNotifier {
 
-   private static final Logger log = LoggerFactory.getLogger(EmailNotifier.class);
+    private static final Logger log = LoggerFactory.getLogger(EmailNotifier.class);
 
     @Override
     public String platform() {
         return NotifyPlatformEnum.EMAIL.name().toLowerCase();
-    }
-
-    @Override
-    public boolean supports() {
-        try {
-            Class.forName("javax.mail.Session");
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
     }
 
     @Override
@@ -111,6 +100,6 @@ public class EmailNotifier extends AbstractNotifier {
                 log.warn("close smtp transport failed", e);
             }
         }
-        log.info("email notify sent, to={}, subject={}", message.getAllRecipients(), message.getSubject());
+        log.debug("email notify sent, to={}, subject={}", message.getAllRecipients(), message.getSubject());
     }
 }

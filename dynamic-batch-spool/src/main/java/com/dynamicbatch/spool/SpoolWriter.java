@@ -53,7 +53,7 @@ class SpoolWriter implements Closeable {
         writeThread = new Thread(this::writeLoop, "spool-writer");
         writeThread.setDaemon(true);
         writeThread.start();
-        log.info("spool writer started, stagingCapacity={}, flushIntervalMs={}",
+        log.debug("spool writer started, stagingCapacity={}, flushIntervalMs={}",
                 config.stagingCapacity, config.flushIntervalMs);
     }
 
@@ -87,7 +87,7 @@ class SpoolWriter implements Closeable {
                 Thread.currentThread().interrupt();
             }
         }
-        log.info("spool writer closed");
+        log.debug("spool writer closed");
     }
 
     // ======================== 写循环 ========================
@@ -146,7 +146,7 @@ class SpoolWriter implements Closeable {
         List<byte[]> remaining = new ArrayList<>();
         stagingQueue.drainTo(remaining);
         if (!remaining.isEmpty()) {
-            log.info("draining {} remaining entries on close", remaining.size());
+            log.debug("draining {} remaining entries on close", remaining.size());
             for (byte[] b : remaining) {
                 writeOne(b);
             }

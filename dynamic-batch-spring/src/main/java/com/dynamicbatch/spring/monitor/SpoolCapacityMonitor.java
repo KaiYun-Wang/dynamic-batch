@@ -42,7 +42,7 @@ public class SpoolCapacityMonitor {
         this.item = findEnabledItem(properties);
         if (item == null) {
             this.scheduler = null;
-            log.info("spool capacity monitor disabled, notify-items has no enabled spool_capacity item");
+            log.debug("spool capacity monitor disabled, notify-items has no enabled spool_capacity item");
             return;
         }
         long intervalSeconds = item.getIntervalSeconds() != null && item.getIntervalSeconds() > 0

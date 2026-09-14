@@ -54,7 +54,7 @@ public final class StatsCollector {
         }
         long interval = config.getCollectIntervalMillis();
         scheduled = SCHEDULER.scheduleWithFixedDelay(this::collectOnce, interval, interval, TimeUnit.MILLISECONDS);
-        log.info("[{}] stats collector started, intervalMillis={}, percentiles={}",
+        log.debug("[{}] stats collector started, intervalMillis={}, percentiles={}",
                 groupKey, interval, Arrays.toString(config.getPercentiles()));
     }
 
@@ -63,7 +63,7 @@ public final class StatsCollector {
         if (scheduled != null) {
             scheduled.cancel(false);
             scheduled = null;
-            log.info("[{}] stats collector stopped", groupKey);
+            log.debug("[{}] stats collector stopped", groupKey);
         }
     }
 

@@ -52,7 +52,7 @@ public final class AppInstance {
     public static void init(String appName, int port) {
         AppInstance.appName = appName != null ? appName : "unknown";
         AppInstance.port = port;
-        log.info("AppInstance initialized, ip={}, appName={}, port={}", IP, appName, port);
+        log.debug("AppInstance initialized, ip={}, appName={}, port={}", IP, appName, port);
     }
 
     public static String getIp() {

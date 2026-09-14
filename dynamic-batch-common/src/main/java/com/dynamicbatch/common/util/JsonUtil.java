@@ -34,9 +34,9 @@ public class JsonUtil {
         }
         if (parser == null) {
             parser = new SimpleJsonParser();
-            log.info("JsonUtil using fallback parser: SimpleJsonParser");
+            log.debug("JsonUtil using fallback parser: SimpleJsonParser");
         } else {
-            log.info("JsonUtil using parser: {}", parser.getClass().getName());
+            log.debug("JsonUtil using parser: {}", parser.getClass().getName());
         }
         JSON_PARSER = parser;
     }

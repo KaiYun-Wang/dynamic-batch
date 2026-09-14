@@ -259,7 +259,7 @@ public class Spool<T> implements Closeable {
             log.error("error closing ChronicleQueue", e);
         }
         releaseLock();
-        log.info("spool closed, dir={}", dir());
+        log.debug("spool closed, dir={}", dir());
     }
 
     public Path dir() {

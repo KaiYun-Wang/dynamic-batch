@@ -1,0 +1,10 @@
+logging:
+  level:
+    com.dynamicbatch: debug
+
+spring:
+  application:
+    name: example-boot35
+
+server:
+  port: 8083

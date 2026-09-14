@@ -88,7 +88,7 @@ class SpoolReader implements Closeable {
         } catch (Exception e) {
             log.warn("release readBuffer failed", e);
         }
-        log.info("spool reader closed");
+        log.debug("spool reader closed");
     }
 
     /**

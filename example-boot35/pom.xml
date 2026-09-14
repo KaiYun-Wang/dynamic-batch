@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.dynamicbatch</groupId>
+        <artifactId>dynamic-batch</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>example-boot35</artifactId>
+    <name>example-boot35</name>
+    <description>示例：Spring Boot 3.3.5 + JDK17 冒烟（仅 BatchTestController）</description>
+
+    <properties>
+        <!-- 本模块用 JDK17 / Boot 3.3.5 验证兼容性；库本身仍是 Java 8 字节码 -->
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <!-- 显式版本：覆盖父 POM 里 Boot 2.7 BOM 的管理 -->
+        <spring-boot35.version>3.3.5</spring-boot35.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.dynamicbatch</groupId>
+            <artifactId>dynamic-batch-spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <version>${spring-boot35.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring-boot35.version}</version>
+                <configuration>
+                    <mainClass>com.dynamicbatch.example.boot35.ExampleBoot35Application</mainClass>
+                    <!-- Chronicle 在 JDK17 运行需要；本 example 自管，不依赖根 POM -->
+                    <jvmArguments>
+                        --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
+                        --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED
+                        --add-exports=java.base/jdk.internal.util=ALL-UNNAMED
+                        --add-exports=java.base/sun.nio.ch=ALL-UNNAMED
+                        --add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED
+                        --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED
+                        --add-opens=java.base/java.io=ALL-UNNAMED
+                        --add-opens=java.base/java.lang=ALL-UNNAMED
+                        --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+                        --add-opens=java.base/java.util=ALL-UNNAMED
+                        --add-opens=java.base/java.nio.channels.spi=ALL-UNNAMED
+                        --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+                        --add-opens=jdk.compiler/com.sun.tools.javac=ALL-UNNAMED
+                    </jvmArguments>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
