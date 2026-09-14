@@ -22,6 +22,7 @@
         <module>dynamic-batch-benchmark</module>
         <module>example-boot27</module>
         <module>example-boot35</module>
+        <module>example-extension</module>
     </modules>
 
     <properties>

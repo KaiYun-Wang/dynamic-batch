@@ -1,0 +1,44 @@
+logging:
+  level:
+    com.dynamicbatch.example.extension: info
+
+spring:
+  application:
+    name: example-extension
+  # 避免与本机其他 example 抢端口
+  # server.port: 8088
+
+server:
+  port: 8088
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,dynamicbatch
+  endpoint:
+    health:
+      show-details: always
+
+# ========== SPI 扩展示例：飞书渠道 ==========
+# 1. 飞书群 → 设置 → 群机器人 → 添加「自定义机器人」→ 复制 webhook
+# 2. 若开启「签名校验」，把密钥填到 secret；未开启则留空
+# 3. POST http://localhost:8088/extension/feishu?content=hello
+dynamic-batch:
+  notify:
+    platforms:
+      - platform: feishu
+        # TODO 换成你的飞书机器人 webhook
+        webhook: ""
+        # TODO 开启加签时填写；否则留空或删除本行
+        secret: ""
+        # post 消息标题（FeishuNotifier 使用）
+        title: "dynamic-batch 扩展示例"
+        timeout: 3000
+    notify-items:
+      - type: offer_failed
+        enabled: true
+        silence-period: 60
+      - type: flush_failed
+        enabled: true
+        silence-period: 60
